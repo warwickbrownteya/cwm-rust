@@ -7,8 +7,8 @@ A Rust implementation of the Closed World Machine (cwm) N3 reasoner and RDF proc
 cwm-rust is a modern, high-performance replacement for the original Python 2 based [cwm](https://www.w3.org/2000/10/swap/doc/cwm.html) tool. It parses N3 (Notation3) syntax, stores RDF triples, and performs forward-chaining inference using N3 rules.
 
 **Key highlights:**
-- **103 built-in predicates** across 7 namespaces (math, string, list, log, time, crypto, os)
-- **~95% feature parity** with original cwm
+- **147 built-in predicates** across 8 namespaces (math, string, list, log, time, crypto, os, graph)
+- **~99% feature parity** with original cwm
 - **Compatible with EYE reasoner** (10/10 compatibility tests passing)
 - **Multiple output formats**: N3, N-Triples, RDF/XML
 
@@ -17,7 +17,7 @@ cwm-rust is a modern, high-performance replacement for the original Python 2 bas
 - **N3/Turtle Parsing**: Full support for N3 syntax including prefixes, blank nodes, collections, and typed literals
 - **Formula Support**: Quoted graphs using `{ ... }` syntax
 - **Rule-Based Inference**: Forward-chaining with `{ body } => { head }` rules
-- **103 Built-in Predicates**: Math, string, list, logic, time, crypto, and OS operations
+- **147 Built-in Predicates**: Math, string, list, logic, time, crypto, OS, and graph operations
 - **Multiple Output Formats**: N3/Turtle, N-Triples, RDF/XML
 - **Web Fetching**: Load remote N3 documents via HTTP/HTTPS
 - **Filter Mode**: Output only inferred triples
@@ -171,9 +171,9 @@ ex:active "true"^^xsd:boolean .
     => { ?x a ?super } .
 ```
 
-## Built-in Predicates (103 total)
+## Built-in Predicates (147 total)
 
-### Math (`http://www.w3.org/2000/10/swap/math#`) - 32 predicates
+### Math (`http://www.w3.org/2000/10/swap/math#`) - 40 predicates
 
 | Predicate | Description | Example |
 |-----------|-------------|---------|
@@ -207,8 +207,14 @@ ex:active "true"^^xsd:boolean .
 | `math:notEqualTo` | Numeric inequality | `5 math:notEqualTo 3` → succeeds |
 | `math:notLessThan` | Greater or equal | `5 math:notLessThan 5` → succeeds |
 | `math:notGreaterThan` | Less or equal | `5 math:notGreaterThan 5` → succeeds |
+| `math:memberCount` | Count items in list | `(1 2 3) math:memberCount ?x` → `?x = 3` |
+| `math:sumOf` | Sum of list | `(1 2 3) math:sumOf ?x` → `?x = 6` |
+| `math:productOf` | Product of list | `(2 3 4) math:productOf ?x` → `?x = 24` |
+| `math:min` | Minimum of list | `(5 2 8) math:min ?x` → `?x = 2` |
+| `math:max` | Maximum of list | `(5 2 8) math:max ?x` → `?x = 8` |
+| `math:average` | Average of list | `(2 4 6) math:average ?x` → `?x = 4` |
 
-### String (`http://www.w3.org/2000/10/swap/string#`) - 25 predicates
+### String (`http://www.w3.org/2000/10/swap/string#`) - 40 predicates
 
 | Predicate | Description | Example |
 |-----------|-------------|---------|
@@ -233,8 +239,21 @@ ex:active "true"^^xsd:boolean .
 | `string:containsRoughly` | Whitespace-normalized contains |
 | `string:lessThan`, `string:greaterThan` | Lexicographic comparison |
 | `string:notLessThan`, `string:notGreaterThan` | Lexicographic comparison |
+| `string:trim` | Trim whitespace | `"  hello  " string:trim ?x` → `?x = "hello"` |
+| `string:trimLeft` | Trim leading whitespace | `"  hello" string:trimLeft ?x` → `?x = "hello"` |
+| `string:trimRight` | Trim trailing whitespace | `"hello  " string:trimRight ?x` → `?x = "hello"` |
+| `string:normalize` | Normalize whitespace | `"  a   b  " string:normalize ?x` → `?x = "a b"` |
+| `string:reverse` | Reverse string | `"hello" string:reverse ?x` → `?x = "olleh"` |
+| `string:indexOf` | Find substring index | `("hello" "l") string:indexOf ?x` → `?x = 2` |
+| `string:lastIndexOf` | Find last index | `("hello" "l") string:lastIndexOf ?x` → `?x = 3` |
+| `string:repeat` | Repeat string | `("ab" 3) string:repeat ?x` → `?x = "ababab"` |
+| `string:padStart` | Pad start of string | `("42" 5 "0") string:padStart ?x` → `?x = "00042"` |
+| `string:padEnd` | Pad end of string | `("42" 5) string:padEnd ?x` → `?x = "42   "` |
+| `string:join` | Join list with separator | `(("a" "b" "c") "-") string:join ?x` → `?x = "a-b-c"` |
+| `string:lines` | Split by newlines | `"a\nb" string:lines ?x` → `?x = ("a" "b")` |
+| `string:words` | Split by whitespace | `"a b c" string:words ?x` → `?x = ("a" "b" "c")` |
 
-### List (`http://www.w3.org/2000/10/swap/list#`) - 12 predicates
+### List (`http://www.w3.org/2000/10/swap/list#`) - 22 predicates
 
 | Predicate | Description | Example |
 |-----------|-------------|---------|
@@ -250,8 +269,17 @@ ex:active "true"^^xsd:boolean .
 | `list:unique` | Remove duplicates | `(1 2 2 3) list:unique ?x` → `?x = (1 2 3)` |
 | `list:sort` | Sort list | `(3 1 2) list:sort ?x` → `?x = (1 2 3)` |
 | `list:reverse` | Reverse list | `(1 2 3) list:reverse ?x` → `?x = (3 2 1)` |
+| `list:flat` | Flatten one level | `((1 2) (3 4)) list:flat ?x` → `?x = (1 2 3 4)` |
+| `list:iterate` | Enumerate with index | `(a b) list:iterate ?x` → `?x = ((0 a) (1 b))` |
+| `list:setDifference` | Set difference | `((1 2 3) (2)) list:setDifference ?x` → `?x = (1 3)` |
+| `list:setIntersection` | Set intersection | `((1 2 3) (2 3 4)) list:setIntersection ?x` → `?x = (2 3)` |
+| `list:setUnion` | Set union | `((1 2) (2 3)) list:setUnion ?x` → `?x = (1 2 3)` |
+| `list:take` | Take first N elements | `((1 2 3 4) 2) list:take ?x` → `?x = (1 2)` |
+| `list:drop` | Drop first N elements | `((1 2 3 4) 2) list:drop ?x` → `?x = (3 4)` |
+| `list:slice` | Extract slice | `((1 2 3 4) 1 3) list:slice ?x` → `?x = (2 3)` |
+| `list:zip` | Zip two lists | `((1 2) (a b)) list:zip ?x` → `?x = ((1 a) (2 b))` |
 
-### Log (`http://www.w3.org/2000/10/swap/log#`) - 16 predicates
+### Log (`http://www.w3.org/2000/10/swap/log#`) - 22 predicates
 
 | Predicate | Description |
 |-----------|-------------|
@@ -272,6 +300,11 @@ ex:active "true"^^xsd:boolean .
 | `log:outputString` | Mark for string output |
 | `log:bound` | Check if variable is bound |
 | `log:notBound` | Check if variable is unbound |
+| `log:racine` | Base URI without fragment |
+| `log:parsedAsN3` | Parse string as N3 |
+| `log:semanticsOrError` | Load document or return error |
+| `log:conclusion` | Derive all conclusions |
+| `log:collectAllIn` | Collect all matching bindings |
 
 ### Time (`http://www.w3.org/2000/10/swap/time#`) - 11 predicates
 
@@ -289,13 +322,19 @@ ex:active "true"^^xsd:boolean .
 | `time:dayOfWeek` | Day of week (0=Sun) | `"2024-01-15T12:00:00Z" time:dayOfWeek ?x` → `?x = 1` |
 | `time:timeZone` | Timezone offset (minutes) | `"2024-01-15T12:00:00+05:30" time:timeZone ?x` → `?x = 330` |
 
-### Crypto (`http://www.w3.org/2000/10/swap/crypto#`) - 3 predicates
+### Crypto (`http://www.w3.org/2000/10/swap/crypto#`) - 9 predicates
 
 | Predicate | Description | Example |
 |-----------|-------------|---------|
 | `crypto:md5` | MD5 hash | `"hello" crypto:md5 ?x` → `?x = "5d41402abc4b2a76..."` |
 | `crypto:sha` | SHA-256 hash | `"hello" crypto:sha ?x` → `?x = "2cf24dba5fb0a30e..."` |
+| `crypto:sha1` | SHA-1 hash | `"hello" crypto:sha1 ?x` |
 | `crypto:sha512` | SHA-512 hash | `"hello" crypto:sha512 ?x` |
+| `crypto:sign` | HMAC-SHA256 signature | `("data" "key") crypto:sign ?x` |
+| `crypto:verify` | Verify HMAC signature | `(("data" "key") "sig") crypto:verify ?x` → `?x = "1"` or `"0"` |
+| `crypto:verifyBoolean` | Verify (success/fail) | `(("data" "key") "sig") crypto:verifyBoolean true` → succeeds/fails |
+| `crypto:base64Encode` | Base64 encode | `"hello" crypto:base64Encode ?x` → `?x = "aGVsbG8="` |
+| `crypto:base64Decode` | Base64 decode | `"aGVsbG8=" crypto:base64Decode ?x` → `?x = "hello"` |
 
 ### OS (`http://www.w3.org/2000/10/swap/os#`) - 4 predicates
 
@@ -305,6 +344,16 @@ ex:active "true"^^xsd:boolean .
 | `os:argv` | Command line argument | `0 os:argv ?x` → `?x = "cwm"` |
 | `os:baseAbsolute` | Resolve to absolute path | `"./file" os:baseAbsolute ?x` |
 | `os:baseRelative` | Convert to relative path | `"/abs/path" os:baseRelative ?x` |
+
+### Graph (`http://www.w3.org/2000/10/swap/graph#`) - 5 predicates
+
+| Predicate | Description | Example |
+|-----------|-------------|---------|
+| `graph:difference` | Graph difference | `({:a :b :c} {:a :b :c}) graph:difference ?x` |
+| `graph:union` | Graph union | `({:a :b :c} {:d :e :f}) graph:union ?x` |
+| `graph:intersection` | Graph intersection | `({:a :b :c. :d :e :f} {:a :b :c}) graph:intersection ?x` |
+| `graph:length` | Triple count | `{:a :b :c. :d :e :f} graph:length ?x` → `?x = 2` |
+| `graph:member` | Get triples from graph | `{:a :b :c} graph:member ?x` |
 
 ## Examples
 

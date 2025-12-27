@@ -36,6 +36,10 @@ chrono = "0.4"
 # Crypto for crypto builtins
 sha2 = "0.10"
 md-5 = "0.10"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.21"
+hex = "0.4"
 
 # HTTP for web fetching
 ureq = { version = "2", features = ["json"] }
