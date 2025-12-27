@@ -202,7 +202,7 @@ impl Reasoner {
         let rest = &patterns[1..];
 
         // Check if this is a built-in predicate
-        if let Some(builtin_results) = self.try_builtin(store, first) {
+        if let Some(builtin_results) = self.try_builtin_with_bindings(store, first, &Bindings::default()) {
             // Handle built-in evaluation
             let mut results = Vec::new();
             for bindings in builtin_results {
@@ -237,7 +237,7 @@ impl Reasoner {
         let rest = &patterns[1..];
 
         // Check for built-in
-        if let Some(builtin_results) = self.try_builtin(store, &pattern) {
+        if let Some(builtin_results) = self.try_builtin_with_bindings(store, &pattern, &bindings) {
             let mut results = Vec::new();
             for new_bindings in builtin_results {
                 let mut merged = bindings.clone();
@@ -267,13 +267,25 @@ impl Reasoner {
     }
 
     /// Try to evaluate a pattern as a built-in predicate
-    fn try_builtin(&self, _store: &Store, pattern: &Triple) -> Option<Vec<Bindings>> {
+    fn try_builtin_with_bindings(&self, _store: &Store, pattern: &Triple, current_bindings: &Bindings) -> Option<Vec<Bindings>> {
         // Check if the predicate is a built-in
         if let Term::Uri(uri) = &pattern.predicate {
             if self.builtins.is_builtin(uri.as_str()) {
-                // TODO: Evaluate the built-in
-                // For now, return None to fall through to regular matching
-                return None;
+                // Evaluate the built-in predicate with current bindings
+                use crate::builtins::BuiltinResult;
+
+                match self.builtins.evaluate(uri.as_str(), &pattern.subject, &pattern.object, current_bindings) {
+                    BuiltinResult::Success(result_bindings) => {
+                        return Some(vec![result_bindings]);
+                    }
+                    BuiltinResult::Failure => {
+                        return Some(vec![]); // No matches
+                    }
+                    BuiltinResult::NotReady => {
+                        // Built-in needs more bound values, fall through to regular matching
+                        return None;
+                    }
+                }
             }
         }
         None
