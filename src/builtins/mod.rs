@@ -1664,15 +1664,26 @@ impl BuiltinRegistry {
             BuiltinResult::Failure
         });
 
-        // log:notIncludes - a log:notIncludes b succeeds if formula a does not include any triple of formula b
+        // log:notIncludes - a log:notIncludes b succeeds if formula a does not include any matching triple of formula b
+        // This is the key predicate for Scoped Negation As Failure (SNAF)
+        // Supports pattern matching with variables in formula b
         self.register(&format!("{}notIncludes", ns::LOG), |subject, object, _bindings| {
             if let (Term::Formula(formula_a), Term::Formula(formula_b)) = (subject, object) {
-                let triples_a: std::collections::HashSet<_> = formula_a.triples().iter().cloned().collect();
-                for triple in formula_b.triples() {
-                    if triples_a.contains(triple) {
+                // For each pattern in formula_b, check if it matches any triple in formula_a
+                for pattern in formula_b.triples() {
+                    let mut found_match = false;
+                    for triple in formula_a.triples() {
+                        if pattern_matches(pattern, triple) {
+                            found_match = true;
+                            break;
+                        }
+                    }
+                    // If any pattern in b matches a triple in a, notIncludes fails
+                    if found_match {
                         return BuiltinResult::Failure;
                     }
                 }
+                // No patterns in b matched any triple in a - success!
                 return BuiltinResult::Success(Bindings::default());
             }
             BuiltinResult::Failure
@@ -4128,6 +4139,72 @@ fn get_string(term: &Term) -> Option<String> {
         Term::Literal(lit) => Some(lit.value().to_string()),
         _ => None,
     }
+}
+
+/// Check if a term matches another term, supporting variables as wildcards
+/// Used for SNAF (Scoped Negation As Failure) pattern matching
+fn term_matches(pattern: &Term, term: &Term) -> bool {
+    match pattern {
+        // Variables in the pattern match anything
+        Term::Variable(_) => true,
+        // For non-variables, do structural comparison
+        Term::Uri(uri1) => {
+            if let Term::Uri(uri2) = term {
+                uri1.as_str() == uri2.as_str()
+            } else {
+                false
+            }
+        }
+        Term::Literal(lit1) => {
+            if let Term::Literal(lit2) = term {
+                lit1.value() == lit2.value() && lit1.datatype() == lit2.datatype()
+            } else {
+                false
+            }
+        }
+        Term::BlankNode(bn1) => {
+            if let Term::BlankNode(bn2) = term {
+                bn1.label() == bn2.label()
+            } else {
+                false
+            }
+        }
+        Term::Formula(f1) => {
+            if let Term::Formula(f2) = term {
+                // For formulas, check if all triples match
+                let triples1 = f1.triples();
+                let triples2 = f2.triples();
+                if triples1.len() != triples2.len() {
+                    return false;
+                }
+                triples1.iter().zip(triples2.iter()).all(|(t1, t2)| {
+                    pattern_matches(t1, t2)
+                })
+            } else {
+                false
+            }
+        }
+        Term::List(list1) => {
+            if let Term::List(list2) = term {
+                if list1.len() != list2.len() {
+                    return false;
+                }
+                list1.iter().zip(list2.iter()).all(|(t1, t2)| {
+                    term_matches(t1, t2)
+                })
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Check if a pattern triple matches a target triple
+/// Variables in the pattern act as wildcards
+fn pattern_matches(pattern: &crate::term::Triple, triple: &crate::term::Triple) -> bool {
+    term_matches(&pattern.subject, &triple.subject) &&
+    term_matches(&pattern.predicate, &triple.predicate) &&
+    term_matches(&pattern.object, &triple.object)
 }
 
 /// Match a number against an object or bind it
