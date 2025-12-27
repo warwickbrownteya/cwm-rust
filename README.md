@@ -75,6 +75,7 @@ cwm input.n3 --think -v
 cwm input.n3 -f n3        # N3/Turtle (default)
 cwm input.n3 -f ntriples  # N-Triples
 cwm input.n3 -f rdf       # RDF/XML
+cwm input.n3 -f jsonld    # JSON-LD
 cwm input.n3 -f debug     # Debug format
 ```
 
@@ -112,6 +113,15 @@ cwm input.n3 --think --purge-builtins
 | `--flatten` | Flatten formula contents into main graph |
 | `--think-passes N` | Number of reasoning passes |
 | `--base URI` | Base URI for relative references |
+| `--no` | Suppress all output |
+| `--purge` | Remove statements with log:Chaff class |
+| `--chatty LEVEL` | Debug level (0-99, higher = more verbose) |
+| `--ugly` | Minimal formatting, fastest mode |
+| `--bySubject` | Sort output by subject |
+| `--pipe` | Process without storing intermediate results |
+| `--reify` | Convert statements to RDF reification |
+| `--dereify` | Reverse reification (reconstruct original triples) |
+| `--with ARGS` | Pass remaining arguments as os:argv values |
 
 ## N3 Syntax Support
 
@@ -454,6 +464,39 @@ ex:alice a ex:Person ; ex:name "Alice" .' | cwm --stdin --format rdf
     <ex:name>Alice</ex:name>
   </rdf:Description>
 </rdf:RDF>
+```
+
+### Example 6: JSON-LD Output
+
+```bash
+$ echo '@prefix ex: <http://example.org/> .
+ex:alice a ex:Person ; ex:name "Alice" ; ex:age 30 .' | cwm --stdin --format jsonld
+```
+
+```json
+{
+  "@context": {
+    "ex": "http://example.org/"
+  },
+  "@graph": [
+    {
+      "@id": "http://example.org/alice",
+      "@type": "http://example.org/Person",
+      "http://example.org/name": "Alice",
+      "http://example.org/age": 30
+    }
+  ]
+}
+```
+
+### Example 7: Reification
+
+```bash
+# Convert statements to RDF reification
+$ cwm data.n3 --reify
+
+# Reverse reification (reconstruct original statements)
+$ cwm reified-data.n3 --dereify
 ```
 
 ## Output Format

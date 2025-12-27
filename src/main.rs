@@ -94,6 +94,42 @@ struct Cli {
     /// Number of think passes (0 for unlimited)
     #[arg(long = "think-passes", value_name = "N")]
     think_passes: Option<usize>,
+
+    /// Suppress all output
+    #[arg(long)]
+    no: bool,
+
+    /// Purge statements with log:Chaff class
+    #[arg(long)]
+    purge: bool,
+
+    /// Debug/chatty level (0-99, higher = more verbose)
+    #[arg(long, value_name = "LEVEL", default_value = "0")]
+    chatty: u8,
+
+    /// Minimal formatting, fastest mode
+    #[arg(long)]
+    ugly: bool,
+
+    /// Sort output by subject
+    #[arg(long = "bySubject")]
+    by_subject: bool,
+
+    /// Pass remaining arguments as os:argv values
+    #[arg(long, value_name = "ARGS", num_args = 0..)]
+    with: Vec<String>,
+
+    /// Pipe mode: process without storing intermediate results
+    #[arg(long)]
+    pipe: bool,
+
+    /// Reify statements (convert to RDF reification)
+    #[arg(long)]
+    reify: bool,
+
+    /// Dereify statements (reverse reification)
+    #[arg(long)]
+    dereify: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -104,6 +140,8 @@ enum OutputFormat {
     Ntriples,
     /// RDF/XML format
     Rdf,
+    /// JSON-LD format
+    Jsonld,
     /// Debug format
     Debug,
 }
@@ -246,6 +284,34 @@ fn main() -> Result<()> {
         output_store = filtered;
     }
 
+    // Purge log:Chaff triples if requested
+    if cli.purge {
+        let log_chaff = "http://www.w3.org/2000/10/swap/log#Chaff";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+        // Find all subjects that are typed as log:Chaff
+        let chaff_subjects: std::collections::HashSet<String> = output_store.iter()
+            .filter(|t| {
+                if let (Term::Uri(pred), Term::Uri(obj)) = (&t.predicate, &t.object) {
+                    pred.as_str() == rdf_type && obj.as_str() == log_chaff
+                } else {
+                    false
+                }
+            })
+            .map(|t| format!("{:?}", t.subject))
+            .collect();
+
+        // Remove triples with chaff subjects
+        let mut filtered = Store::new();
+        for triple in output_store.iter() {
+            let subject_key = format!("{:?}", triple.subject);
+            if !chaff_subjects.contains(&subject_key) {
+                filtered.add(triple.clone());
+            }
+        }
+        output_store = filtered;
+    }
+
     // Purge builtins from output if requested
     if cli.purge_builtins {
         let builtin_namespaces = [
@@ -256,6 +322,7 @@ fn main() -> Result<()> {
             "http://www.w3.org/2000/10/swap/crypto#",
             "http://www.w3.org/2000/10/swap/time#",
             "http://www.w3.org/2000/10/swap/os#",
+            "http://www.w3.org/2000/10/swap/graph#",
         ];
         let mut filtered = Store::new();
         for triple in output_store.iter() {
@@ -272,6 +339,21 @@ fn main() -> Result<()> {
         output_store = filtered;
     }
 
+    // Apply reification if requested
+    if cli.reify {
+        output_store = reify_store(&output_store);
+    }
+
+    // Apply dereification if requested
+    if cli.dereify {
+        output_store = dereify_store(&output_store);
+    }
+
+    // Suppress output if --no flag is set
+    if cli.no {
+        return Ok(());
+    }
+
     // Generate output
     let output_content = if cli.strings {
         // --strings mode: output literal values only
@@ -282,11 +364,15 @@ fn main() -> Result<()> {
             }
         }
         strings.join("\n") + if strings.is_empty() { "" } else { "\n" }
+    } else if cli.ugly {
+        // Ugly mode: minimal formatting, fastest
+        format_ntriples(&output_store)
     } else {
         match cli.format {
             OutputFormat::N3 => format_n3(&output_store, &all_prefixes),
             OutputFormat::Ntriples => format_ntriples(&output_store),
             OutputFormat::Rdf => format_rdfxml(&output_store, &all_prefixes),
+            OutputFormat::Jsonld => format_jsonld(&output_store, &all_prefixes),
             OutputFormat::Debug => format!("{:?}", output_store),
         }
     };
@@ -672,4 +758,231 @@ fn split_uri(uri: &str) -> (&str, &str) {
     } else {
         (uri, "")
     }
+}
+
+/// Reify a store (convert statements to RDF reification)
+fn reify_store(store: &Store) -> Store {
+    let mut result = Store::new();
+    let rdf_type = Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let rdf_statement = Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#Statement");
+    let rdf_subject = Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#subject");
+    let rdf_predicate = Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate");
+    let rdf_object = Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#object");
+
+    for (i, triple) in store.iter().enumerate() {
+        // Create a blank node for this statement
+        let stmt_node = Term::BlankNode(cwm::BlankNode::labeled(format!("stmt{}", i)));
+
+        // Add the reification triples
+        result.add(Triple::new(stmt_node.clone(), rdf_type.clone(), rdf_statement.clone()));
+        result.add(Triple::new(stmt_node.clone(), rdf_subject.clone(), triple.subject.clone()));
+        result.add(Triple::new(stmt_node.clone(), rdf_predicate.clone(), triple.predicate.clone()));
+        result.add(Triple::new(stmt_node.clone(), rdf_object.clone(), triple.object.clone()));
+    }
+
+    result
+}
+
+/// Dereify a store (reverse reification)
+fn dereify_store(store: &Store) -> Store {
+    let mut result = Store::new();
+    let rdf_type_uri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let rdf_statement_uri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#Statement";
+    let rdf_subject_uri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject";
+    let rdf_predicate_uri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate";
+    let rdf_object_uri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#object";
+
+    // Find all statement nodes
+    let mut statement_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for triple in store.iter() {
+        if let (Term::Uri(pred), Term::Uri(obj)) = (&triple.predicate, &triple.object) {
+            if pred.as_str() == rdf_type_uri && obj.as_str() == rdf_statement_uri {
+                statement_nodes.insert(format!("{:?}", triple.subject));
+            }
+        }
+    }
+
+    // Collect subject/predicate/object for each statement node
+    let mut subjects: HashMap<String, Term> = HashMap::new();
+    let mut predicates: HashMap<String, Term> = HashMap::new();
+    let mut objects: HashMap<String, Term> = HashMap::new();
+
+    for triple in store.iter() {
+        let subj_key = format!("{:?}", triple.subject);
+        if statement_nodes.contains(&subj_key) {
+            if let Term::Uri(pred) = &triple.predicate {
+                let pred_str = pred.as_str();
+                if pred_str == rdf_subject_uri {
+                    subjects.insert(subj_key.clone(), triple.object.clone());
+                } else if pred_str == rdf_predicate_uri {
+                    predicates.insert(subj_key.clone(), triple.object.clone());
+                } else if pred_str == rdf_object_uri {
+                    objects.insert(subj_key.clone(), triple.object.clone());
+                }
+            }
+        }
+    }
+
+    // Reconstruct original triples
+    for stmt_key in &statement_nodes {
+        if let (Some(s), Some(p), Some(o)) = (subjects.get(stmt_key), predicates.get(stmt_key), objects.get(stmt_key)) {
+            result.add(Triple::new(s.clone(), p.clone(), o.clone()));
+        }
+    }
+
+    // Also add non-reification triples
+    for triple in store.iter() {
+        let subj_key = format!("{:?}", triple.subject);
+        if !statement_nodes.contains(&subj_key) {
+            // Check if this triple is part of reification pattern
+            if let Term::Uri(pred) = &triple.predicate {
+                let pred_str = pred.as_str();
+                if pred_str != rdf_subject_uri && pred_str != rdf_predicate_uri &&
+                   pred_str != rdf_object_uri && !(pred_str == rdf_type_uri &&
+                   matches!(&triple.object, Term::Uri(u) if u.as_str() == rdf_statement_uri)) {
+                    result.add(triple.clone());
+                }
+            } else {
+                result.add(triple.clone());
+            }
+        }
+    }
+
+    result
+}
+
+/// Format store as JSON-LD
+fn format_jsonld(store: &Store, prefixes: &IndexMap<String, String>) -> String {
+    let mut output = String::new();
+    output.push_str("{\n");
+
+    // Add context
+    output.push_str("  \"@context\": {\n");
+    let mut context_entries = Vec::new();
+    for (short, long) in prefixes {
+        context_entries.push(format!("    \"{}\": \"{}\"", short, long));
+    }
+    output.push_str(&context_entries.join(",\n"));
+    if !context_entries.is_empty() {
+        output.push('\n');
+    }
+    output.push_str("  },\n");
+
+    // Group triples by subject
+    let mut by_subject: IndexMap<String, Vec<&Triple>> = IndexMap::new();
+    for triple in store.iter() {
+        let key = format!("{:?}", triple.subject);
+        by_subject.entry(key).or_default().push(triple);
+    }
+
+    output.push_str("  \"@graph\": [\n");
+
+    let mut first_subject = true;
+    for (_, triples) in by_subject {
+        if triples.is_empty() {
+            continue;
+        }
+
+        if !first_subject {
+            output.push_str(",\n");
+        }
+        first_subject = false;
+
+        output.push_str("    {\n");
+
+        // Output @id
+        let subject = &triples[0].subject;
+        match subject {
+            Term::Uri(u) => {
+                output.push_str(&format!("      \"@id\": \"{}\",\n", u.as_str()));
+            }
+            Term::BlankNode(b) => {
+                output.push_str(&format!("      \"@id\": \"_:{}\",\n", b.id()));
+            }
+            _ => {}
+        }
+
+        // Group by predicate
+        let mut by_pred: IndexMap<String, Vec<&Term>> = IndexMap::new();
+        for triple in &triples {
+            if let Term::Uri(pred) = &triple.predicate {
+                by_pred.entry(pred.as_str().to_string()).or_default().push(&triple.object);
+            }
+        }
+
+        let pred_count = by_pred.len();
+        for (i, (pred_uri, objs)) in by_pred.iter().enumerate() {
+            let pred_key = if pred_uri == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" {
+                "@type".to_string()
+            } else {
+                format!("\"{}\"", pred_uri)
+            };
+
+            output.push_str(&format!("      {}: ", pred_key));
+
+            if objs.len() == 1 {
+                output.push_str(&format_jsonld_value(objs[0]));
+            } else {
+                output.push_str("[\n");
+                for (j, obj) in objs.iter().enumerate() {
+                    output.push_str(&format!("        {}", format_jsonld_value(obj)));
+                    if j < objs.len() - 1 {
+                        output.push(',');
+                    }
+                    output.push('\n');
+                }
+                output.push_str("      ]");
+            }
+
+            if i < pred_count - 1 {
+                output.push(',');
+            }
+            output.push('\n');
+        }
+
+        output.push_str("    }");
+    }
+
+    output.push_str("\n  ]\n");
+    output.push_str("}\n");
+
+    output
+}
+
+/// Format a term as JSON-LD value
+fn format_jsonld_value(term: &Term) -> String {
+    match term {
+        Term::Uri(u) => format!("\"{}\"", u.as_str()),
+        Term::Literal(lit) => {
+            match lit.datatype() {
+                Datatype::Plain => format!("\"{}\"", escape_json(lit.value())),
+                Datatype::Language(lang) => {
+                    format!("{{ \"@value\": \"{}\", \"@language\": \"{}\" }}", escape_json(lit.value()), lang)
+                }
+                Datatype::Typed(dt) => {
+                    // Check for native JSON types
+                    if dt == "http://www.w3.org/2001/XMLSchema#integer" ||
+                       dt == "http://www.w3.org/2001/XMLSchema#decimal" ||
+                       dt == "http://www.w3.org/2001/XMLSchema#double" {
+                        lit.value().to_string()
+                    } else if dt == "http://www.w3.org/2001/XMLSchema#boolean" {
+                        lit.value().to_string()
+                    } else {
+                        format!("{{ \"@value\": \"{}\", \"@type\": \"{}\" }}", escape_json(lit.value()), dt)
+                    }
+                }
+            }
+        }
+        Term::BlankNode(b) => format!("{{ \"@id\": \"_:{}\" }}", b.id()),
+        _ => "null".to_string(),
+    }
+}
+
+/// Escape special JSON characters
+fn escape_json(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
