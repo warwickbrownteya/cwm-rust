@@ -10,7 +10,8 @@ cwm-rust is a modern, high-performance replacement for the original Python 2 bas
 - **147 built-in predicates** across 8 namespaces (math, string, list, log, time, crypto, os, graph)
 - **~99% feature parity** with original cwm
 - **Compatible with EYE reasoner** (10/10 compatibility tests passing)
-- **Multiple output formats**: N3, N-Triples, RDF/XML
+- **Multiple output formats**: N3, N-Triples, RDF/XML, JSON-LD
+- **SPARQL query support** with XML and JSON result formats
 
 ## Features
 
@@ -18,7 +19,8 @@ cwm-rust is a modern, high-performance replacement for the original Python 2 bas
 - **Formula Support**: Quoted graphs using `{ ... }` syntax
 - **Rule-Based Inference**: Forward-chaining with `{ body } => { head }` rules
 - **147 Built-in Predicates**: Math, string, list, logic, time, crypto, OS, and graph operations
-- **Multiple Output Formats**: N3/Turtle, N-Triples, RDF/XML
+- **Multiple Output Formats**: N3/Turtle, N-Triples, RDF/XML, JSON-LD
+- **SPARQL Queries**: SELECT, ASK, CONSTRUCT, DESCRIBE with XML/JSON results
 - **Web Fetching**: Load remote N3 documents via HTTP/HTTPS
 - **Filter Mode**: Output only inferred triples
 - **Flexible Input**: Load data files, rule files, or both
@@ -122,6 +124,9 @@ cwm input.n3 --think --purge-builtins
 | `--reify` | Convert statements to RDF reification |
 | `--dereify` | Reverse reification (reconstruct original triples) |
 | `--with ARGS` | Pass remaining arguments as os:argv values |
+| `--sparql FILE` | Execute SPARQL query from file |
+| `--sparql-query QUERY` | Execute inline SPARQL query |
+| `--sparql-results FORMAT` | SPARQL result format: xml (default), json |
 
 ## N3 Syntax Support
 
@@ -497,6 +502,93 @@ $ cwm data.n3 --reify
 
 # Reverse reification (reconstruct original statements)
 $ cwm reified-data.n3 --dereify
+```
+
+## SPARQL Query Support
+
+cwm-rust includes built-in SPARQL query support for querying RDF data after loading and reasoning.
+
+### Query Types
+
+- **SELECT**: Return variable bindings as a table
+- **ASK**: Return boolean (true/false) for pattern match
+- **CONSTRUCT**: Build a new graph from a template
+- **DESCRIBE**: Get triples describing resources
+
+### CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `--sparql FILE` | Execute SPARQL query from file |
+| `--sparql-query QUERY` | Execute inline SPARQL query |
+| `--sparql-results FORMAT` | Result format: `xml` (default), `json` |
+
+### SPARQL Examples
+
+#### SELECT Query
+
+```bash
+echo '@prefix ex: <http://example.org/> .
+ex:alice ex:name "Alice" ; ex:age 30 .
+ex:bob ex:name "Bob" ; ex:age 25 .' | \
+cwm --stdin --sparql-query "SELECT ?name ?age WHERE { ?s <http://example.org/name> ?name . ?s <http://example.org/age> ?age }"
+```
+
+#### ASK Query
+
+```bash
+echo '@prefix ex: <http://example.org/> .
+ex:alice a ex:Person .' | \
+cwm --stdin --sparql-query "ASK { ?x a <http://example.org/Person> }"
+```
+
+#### JSON Output
+
+```bash
+cwm data.n3 --sparql-query "SELECT ?s ?p ?o WHERE { ?s ?p ?o }" --sparql-results json
+```
+
+### SPARQL Features Supported
+
+- **PREFIX declarations**: `PREFIX ex: <http://example.org/>`
+- **SELECT DISTINCT**: Remove duplicate results
+- **ORDER BY**: Sort results (ASC/DESC)
+- **LIMIT/OFFSET**: Pagination
+- **OPTIONAL**: Left outer join patterns
+- **FILTER**: Conditions with operators
+  - Comparison: `<`, `>`, `<=`, `>=`, `=`, `!=`
+  - Boolean: `&&`, `||`, `!`
+  - Functions: `BOUND()`, `REGEX()`, `CONTAINS()`, `STRSTARTS()`, `STRENDS()`, `STR()`, `STRLEN()`, `LANG()`, `DATATYPE()`, `isIRI()`, `isBlank()`, `isLiteral()`
+
+### Result Formats
+
+**XML (application/sparql-results+xml)**:
+```xml
+<?xml version="1.0"?>
+<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+  <head>
+    <variable name="name"/>
+  </head>
+  <results>
+    <result>
+      <binding name="name">
+        <literal>Alice</literal>
+      </binding>
+    </result>
+  </results>
+</sparql>
+```
+
+**JSON (application/sparql-results+json)**:
+```json
+{
+  "head": { "vars": ["name"] },
+  "results": {
+    "bindings": [
+      { "name": { "type": "literal", "value": "Alice" } }
+    ]
+  }
+}
 ```
 
 ## Output Format
