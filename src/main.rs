@@ -35,7 +35,7 @@ struct Cli {
     #[arg(long)]
     filter: bool,
 
-    /// Maximum number of inference steps
+    /// Maximum number of inference steps (0 for unlimited)
     #[arg(long, default_value = "10000")]
     max_steps: usize,
 
@@ -58,6 +58,42 @@ struct Cli {
     /// Quiet mode (suppress info messages)
     #[arg(short, long)]
     quiet: bool,
+
+    /// Apply rules from specified file(s)
+    #[arg(long = "apply", value_name = "RULES")]
+    apply: Vec<PathBuf>,
+
+    /// Load rules from specified file(s)
+    #[arg(long = "rules", value_name = "RULES")]
+    rules: Vec<PathBuf>,
+
+    /// Output strings only (values of matching patterns)
+    #[arg(long)]
+    strings: bool,
+
+    /// Purge rules from output
+    #[arg(long = "purge-rules")]
+    purge_rules: bool,
+
+    /// Purge triples with builtin predicates from output
+    #[arg(long = "purge-builtins")]
+    purge_builtins: bool,
+
+    /// Operating mode: r=read, w=write, t=think, f=filter
+    #[arg(long = "mode", value_name = "MODE")]
+    mode: Option<String>,
+
+    /// Data files to load (no rules extracted)
+    #[arg(long = "data", value_name = "FILE")]
+    data: Vec<PathBuf>,
+
+    /// Flatten formula contents into main graph
+    #[arg(long)]
+    flatten: bool,
+
+    /// Number of think passes (0 for unlimited)
+    #[arg(long = "think-passes", value_name = "N")]
+    think_passes: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -66,6 +102,8 @@ enum OutputFormat {
     N3,
     /// N-Triples format
     Ntriples,
+    /// RDF/XML format
+    Rdf,
     /// Debug format
     Debug,
 }
@@ -73,10 +111,14 @@ enum OutputFormat {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Collect all prefixes
+    let mut all_prefixes: IndexMap<String, String> = IndexMap::new();
+    let mut all_rules = Vec::new();
+
     // Collect input content
     let mut content = String::new();
 
-    if cli.stdin || cli.inputs.is_empty() {
+    if cli.stdin || (cli.inputs.is_empty() && cli.data.is_empty() && cli.apply.is_empty() && cli.rules.is_empty()) {
         io::stdin().read_to_string(&mut content)
             .context("Failed to read from stdin")?;
     }
@@ -88,39 +130,77 @@ fn main() -> Result<()> {
         content.push('\n');
     }
 
-    // Parse input
+    // Parse main input
     let parse_result = parse(&content)
         .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
 
     let mut store = Store::new();
     store.add_all(parse_result.triples.clone());
+    all_prefixes.extend(parse_result.prefixes.clone());
+    all_rules.extend(parse_result.rules.clone());
+
+    // Load data files (no rules extracted)
+    for path in &cli.data {
+        let file_content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read data file: {}", path.display()))?;
+        let data_result = parse(&file_content)
+            .map_err(|e| anyhow::anyhow!("Parse error in {}: {}", path.display(), e))?;
+        store.add_all(data_result.triples);
+        all_prefixes.extend(data_result.prefixes);
+        // Don't add rules from --data files
+    }
+
+    // Load rules from --rules files
+    for path in &cli.rules {
+        let file_content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read rules file: {}", path.display()))?;
+        let rules_result = parse(&file_content)
+            .map_err(|e| anyhow::anyhow!("Parse error in {}: {}", path.display(), e))?;
+        all_prefixes.extend(rules_result.prefixes);
+        all_rules.extend(rules_result.rules);
+        // Also add any triples from rules files
+        store.add_all(rules_result.triples);
+    }
+
+    // Load rules from --apply files (same as --rules but implies --think)
+    let should_think = cli.think || !cli.apply.is_empty();
+    for path in &cli.apply {
+        let file_content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read apply file: {}", path.display()))?;
+        let apply_result = parse(&file_content)
+            .map_err(|e| anyhow::anyhow!("Parse error in {}: {}", path.display(), e))?;
+        all_prefixes.extend(apply_result.prefixes);
+        all_rules.extend(apply_result.rules);
+        store.add_all(apply_result.triples);
+    }
 
     // Track original triples for --filter mode
     let original_triples: std::collections::HashSet<Triple> = if cli.filter {
-        parse_result.triples.iter().cloned().collect()
+        store.iter().cloned().collect()
     } else {
         std::collections::HashSet::new()
     };
 
     if !cli.quiet && cli.verbose {
         eprintln!("Loaded {} triples", store.len());
-        if !parse_result.rules.is_empty() {
-            eprintln!("Found {} rules", parse_result.rules.len());
+        if !all_rules.is_empty() {
+            eprintln!("Found {} rules", all_rules.len());
         }
     }
 
     // Run reasoning if requested
-    if cli.think {
+    if should_think {
+        let max_steps = if cli.max_steps == 0 { usize::MAX } else { cli.max_steps };
         let config = ReasonerConfig {
-            max_steps: cli.max_steps,
+            max_steps,
             recursive: true,
             filter: cli.filter,
         };
 
         let mut reasoner = Reasoner::with_config(config);
 
-        // Add rules from the parsed input
-        for rule in parse_result.rules {
+        // Add all rules
+        for rule in all_rules {
             reasoner.add_rule(rule);
         }
 
@@ -138,7 +218,7 @@ fn main() -> Result<()> {
     }
 
     // Apply filter if requested: output only inferred triples
-    let output_store = if cli.filter && cli.think {
+    let mut output_store = if cli.filter && should_think {
         let mut filtered = Store::new();
         for triple in store.iter() {
             if !original_triples.contains(triple) {
@@ -150,11 +230,65 @@ fn main() -> Result<()> {
         store
     };
 
+    // Purge rules from output if requested
+    if cli.purge_rules {
+        let log_implies = "http://www.w3.org/2000/10/swap/log#implies";
+        let mut filtered = Store::new();
+        for triple in output_store.iter() {
+            if let Term::Uri(uri) = &triple.predicate {
+                if uri.as_str() != log_implies {
+                    filtered.add(triple.clone());
+                }
+            } else {
+                filtered.add(triple.clone());
+            }
+        }
+        output_store = filtered;
+    }
+
+    // Purge builtins from output if requested
+    if cli.purge_builtins {
+        let builtin_namespaces = [
+            "http://www.w3.org/2000/10/swap/math#",
+            "http://www.w3.org/2000/10/swap/string#",
+            "http://www.w3.org/2000/10/swap/log#",
+            "http://www.w3.org/2000/10/swap/list#",
+            "http://www.w3.org/2000/10/swap/crypto#",
+            "http://www.w3.org/2000/10/swap/time#",
+            "http://www.w3.org/2000/10/swap/os#",
+        ];
+        let mut filtered = Store::new();
+        for triple in output_store.iter() {
+            if let Term::Uri(uri) = &triple.predicate {
+                let uri_str = uri.as_str();
+                let is_builtin = builtin_namespaces.iter().any(|ns| uri_str.starts_with(ns));
+                if !is_builtin {
+                    filtered.add(triple.clone());
+                }
+            } else {
+                filtered.add(triple.clone());
+            }
+        }
+        output_store = filtered;
+    }
+
     // Generate output
-    let output_content = match cli.format {
-        OutputFormat::N3 => format_n3(&output_store, &parse_result.prefixes),
-        OutputFormat::Ntriples => format_ntriples(&output_store),
-        OutputFormat::Debug => format!("{:?}", output_store),
+    let output_content = if cli.strings {
+        // --strings mode: output literal values only
+        let mut strings = Vec::new();
+        for triple in output_store.iter() {
+            if let Term::Literal(lit) = &triple.object {
+                strings.push(lit.value().to_string());
+            }
+        }
+        strings.join("\n") + if strings.is_empty() { "" } else { "\n" }
+    } else {
+        match cli.format {
+            OutputFormat::N3 => format_n3(&output_store, &all_prefixes),
+            OutputFormat::Ntriples => format_ntriples(&output_store),
+            OutputFormat::Rdf => format_rdfxml(&output_store, &all_prefixes),
+            OutputFormat::Debug => format!("{:?}", output_store),
+        }
     };
 
     // Write output
@@ -398,4 +532,144 @@ fn format_ntriples(store: &Store) -> String {
         output.push_str(&format!("{} {} {} .\n", triple.subject, triple.predicate, triple.object));
     }
     output
+}
+
+/// Format store as RDF/XML
+fn format_rdfxml(store: &Store, prefixes: &IndexMap<String, String>) -> String {
+    let mut output = String::new();
+
+    output.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    output.push_str("<rdf:RDF\n");
+    output.push_str("    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"\n");
+
+    // Add namespace declarations
+    for (short, long) in prefixes {
+        if short != "rdf" {
+            output.push_str(&format!("    xmlns:{}=\"{}\"\n", short, long));
+        }
+    }
+    output.push_str(">\n\n");
+
+    // Group triples by subject
+    let mut by_subject: IndexMap<String, Vec<&Triple>> = IndexMap::new();
+    for triple in store.iter() {
+        let key = format!("{:?}", triple.subject);
+        by_subject.entry(key).or_default().push(triple);
+    }
+
+    for (_, triples) in by_subject {
+        if triples.is_empty() {
+            continue;
+        }
+
+        let subject = &triples[0].subject;
+
+        // Start rdf:Description
+        match subject {
+            Term::Uri(u) => {
+                output.push_str(&format!("  <rdf:Description rdf:about=\"{}\">\n", escape_xml(u.as_str())));
+            }
+            Term::BlankNode(b) => {
+                output.push_str(&format!("  <rdf:Description rdf:nodeID=\"{}\">\n", b.id()));
+            }
+            _ => continue, // Skip non-resource subjects
+        }
+
+        // Output predicates and objects
+        for triple in &triples {
+            if let Term::Uri(pred_uri) = &triple.predicate {
+                let pred_str = pred_uri.as_str();
+
+                // Try to split into prefix:local
+                let (ns, local) = split_uri(pred_str);
+
+                // Find prefix for namespace
+                let prefix = prefixes.iter()
+                    .find(|(_, v)| v.as_str() == ns)
+                    .map(|(k, _)| k.as_str());
+
+                let pred_qname = if let Some(p) = prefix {
+                    format!("{}:{}", p, local)
+                } else if ns == "http://www.w3.org/1999/02/22-rdf-syntax-ns#" {
+                    format!("rdf:{}", local)
+                } else {
+                    // Use full URI as element name (not ideal but valid)
+                    continue;
+                };
+
+                match &triple.object {
+                    Term::Uri(u) => {
+                        output.push_str(&format!(
+                            "    <{} rdf:resource=\"{}\"/>\n",
+                            pred_qname,
+                            escape_xml(u.as_str())
+                        ));
+                    }
+                    Term::Literal(lit) => {
+                        match lit.datatype() {
+                            Datatype::Plain => {
+                                output.push_str(&format!(
+                                    "    <{}>{}</{}>\n",
+                                    pred_qname,
+                                    escape_xml(lit.value()),
+                                    pred_qname
+                                ));
+                            }
+                            Datatype::Language(lang) => {
+                                output.push_str(&format!(
+                                    "    <{} xml:lang=\"{}\">{}</{}>\n",
+                                    pred_qname,
+                                    lang,
+                                    escape_xml(lit.value()),
+                                    pred_qname
+                                ));
+                            }
+                            Datatype::Typed(dt) => {
+                                output.push_str(&format!(
+                                    "    <{} rdf:datatype=\"{}\">{}</{}>\n",
+                                    pred_qname,
+                                    escape_xml(dt),
+                                    escape_xml(lit.value()),
+                                    pred_qname
+                                ));
+                            }
+                        }
+                    }
+                    Term::BlankNode(b) => {
+                        output.push_str(&format!(
+                            "    <{} rdf:nodeID=\"{}\"/>\n",
+                            pred_qname,
+                            b.id()
+                        ));
+                    }
+                    _ => {} // Skip complex objects
+                }
+            }
+        }
+
+        output.push_str("  </rdf:Description>\n\n");
+    }
+
+    output.push_str("</rdf:RDF>\n");
+    output
+}
+
+/// Escape special XML characters
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Split a URI into namespace and local name
+fn split_uri(uri: &str) -> (&str, &str) {
+    if let Some(pos) = uri.rfind('#') {
+        (&uri[..=pos], &uri[pos + 1..])
+    } else if let Some(pos) = uri.rfind('/') {
+        (&uri[..=pos], &uri[pos + 1..])
+    } else {
+        (uri, "")
+    }
 }

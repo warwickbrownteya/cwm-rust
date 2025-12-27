@@ -6,10 +6,18 @@
 //! - log: logical operations
 //! - list: list operations
 //! - crypto: cryptographic functions
+//! - time: date and time operations
+//! - os: operating system functions
 
 use std::collections::HashMap;
 use regex::Regex;
+use chrono::{DateTime, Datelike, Timelike, Utc, Local, TimeZone};
+use sha2::{Sha256, Sha512, Digest};
+use md5::Md5;
 use crate::term::{Term, Bindings, uri::ns};
+
+// Re-export ureq for web fetching
+use ureq;
 
 /// Result of evaluating a built-in
 #[derive(Debug, Clone)]
@@ -45,6 +53,12 @@ impl BuiltinRegistry {
         registry.register_log();
         // Register list built-ins
         registry.register_list();
+        // Register time built-ins
+        registry.register_time();
+        // Register crypto built-ins
+        registry.register_crypto();
+        // Register os built-ins
+        registry.register_os();
 
         registry
     }
@@ -700,6 +714,54 @@ impl BuiltinRegistry {
             }
             BuiltinResult::NotReady
         });
+
+        // string:concat - same as concatenation but takes exactly 2 strings
+        self.register(&format!("{}concat", ns::STRING), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(a), Some(b)) = (get_string(&items[0]), get_string(&items[1])) {
+                        let result = format!("{}{}", a, b);
+                        return match_or_bind_string(object, result, bindings);
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // string:containsIgnoringCase - a string:containsIgnoringCase b succeeds if lowercase(a) contains lowercase(b)
+        self.register(&format!("{}containsIgnoringCase", ns::STRING), |subject, object, _bindings| {
+            if let (Some(a), Some(b)) = (get_string(subject), get_string(object)) {
+                if a.to_lowercase().contains(&b.to_lowercase()) {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // string:containsRoughly - a string:containsRoughly b (case-insensitive, whitespace-normalized)
+        self.register(&format!("{}containsRoughly", ns::STRING), |subject, object, _bindings| {
+            if let (Some(a), Some(b)) = (get_string(subject), get_string(object)) {
+                let a_norm: String = a.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+                let b_norm: String = b.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+                if a_norm.contains(&b_norm) {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // string:notContainsRoughly - a string:notContainsRoughly b
+        self.register(&format!("{}notContainsRoughly", ns::STRING), |subject, object, _bindings| {
+            if let (Some(a), Some(b)) = (get_string(subject), get_string(object)) {
+                let a_norm: String = a.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+                let b_norm: String = b.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+                if !a_norm.contains(&b_norm) {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
     }
 
     fn register_log(&mut self) {
@@ -805,6 +867,160 @@ impl BuiltinRegistry {
                 }
             }
             BuiltinResult::NotReady
+        });
+
+        // log:dtlit - (value datatype) log:dtlit typedLiteral
+        self.register(&format!("{}dtlit", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(value), Term::Uri(datatype)) = (get_string(&items[0]), &items[1]) {
+                        let result = Term::typed_literal(value, datatype.as_str());
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if result == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:rawUri - a log:rawUri b where b is the URI string representation
+        self.register(&format!("{}rawUri", ns::LOG), |subject, object, bindings| {
+            if let Term::Uri(uri) = subject {
+                return match_or_bind_string(object, uri.as_str().to_string(), bindings);
+            }
+            // Reverse: string to URI
+            if let Some(uri_str) = get_string(object) {
+                if let Term::Variable(var) = subject {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), Term::uri(&uri_str));
+                    return BuiltinResult::Success(new_bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:langlit - (value lang) log:langlit langLiteral
+        self.register(&format!("{}langlit", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(value), Some(lang)) = (get_string(&items[0]), get_string(&items[1])) {
+                        let result = Term::lang_literal(value, &lang);
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if result == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:n3String - formula log:n3String n3StringRepresentation
+        self.register(&format!("{}n3String", ns::LOG), |subject, object, bindings| {
+            if let Term::Formula(formula) = subject {
+                // Serialize formula to N3
+                let mut n3 = String::new();
+                n3.push_str("{ ");
+                for (i, triple) in formula.triples().iter().enumerate() {
+                    if i > 0 {
+                        n3.push_str(" . ");
+                    }
+                    n3.push_str(&format!("{} {} {}", triple.subject, triple.predicate, triple.object));
+                }
+                n3.push_str(" }");
+                return match_or_bind_string(object, n3, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:content - uri log:content stringContent (reads file content)
+        self.register(&format!("{}content", ns::LOG), |subject, object, bindings| {
+            if let Term::Uri(uri) = subject {
+                let uri_str = uri.as_str();
+
+                // Handle file:// URIs
+                if uri_str.starts_with("file://") {
+                    let path = &uri_str[7..];
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        return match_or_bind_string(object, content, bindings);
+                    }
+                }
+                // Handle http:// and https:// URIs
+                else if uri_str.starts_with("http://") || uri_str.starts_with("https://") {
+                    if let Ok(response) = ureq::get(uri_str).call() {
+                        if let Ok(content) = response.into_string() {
+                            return match_or_bind_string(object, content, bindings);
+                        }
+                    }
+                }
+                // Handle local file paths
+                else if let Ok(content) = std::fs::read_to_string(uri_str) {
+                    return match_or_bind_string(object, content, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:outputString - value log:outputString value (identity, marks for string output)
+        self.register(&format!("{}outputString", ns::LOG), |subject, object, bindings| {
+            if let Some(s) = get_string(subject) {
+                return match_or_bind_string(object, s, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:semantics - uri log:semantics formula (loads and parses document)
+        // Note: This is a simplified implementation that returns empty formula
+        // Full implementation would require parser integration
+        self.register(&format!("{}semantics", ns::LOG), |subject, object, bindings| {
+            if let Term::Uri(uri) = subject {
+                let uri_str = uri.as_str();
+                let content = if uri_str.starts_with("file://") {
+                    std::fs::read_to_string(&uri_str[7..]).ok()
+                } else if uri_str.starts_with("http://") || uri_str.starts_with("https://") {
+                    ureq::get(uri_str).call().ok().and_then(|r| r.into_string().ok())
+                } else {
+                    std::fs::read_to_string(uri_str).ok()
+                };
+
+                if let Some(_content) = content {
+                    // Return an empty formula as placeholder
+                    // Full implementation would parse the content
+                    let result = Term::Formula(crate::term::FormulaRef::new(0, Vec::new()));
+                    if let Term::Variable(var) = object {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(var.clone(), result);
+                        return BuiltinResult::Success(new_bindings);
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:bound - variable log:bound value (succeeds if variable is bound)
+        self.register(&format!("{}bound", ns::LOG), |subject, _object, _bindings| {
+            match subject {
+                Term::Variable(_) => BuiltinResult::Failure,
+                _ => BuiltinResult::Success(Bindings::default()),
+            }
+        });
+
+        // log:notBound - variable log:notBound value (succeeds if variable is not bound)
+        self.register(&format!("{}notBound", ns::LOG), |subject, _object, _bindings| {
+            match subject {
+                Term::Variable(_) => BuiltinResult::Success(Bindings::default()),
+                _ => BuiltinResult::Failure,
+            }
         });
     }
 
@@ -1025,6 +1241,228 @@ impl BuiltinRegistry {
                                     return BuiltinResult::Success(bindings.clone());
                                 }
                             }
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+    }
+
+    fn register_time(&mut self) {
+        // time:inSeconds - dateTimeString time:inSeconds secondsSinceEpoch
+        self.register(&format!("{}inSeconds", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                // Try to parse ISO 8601 datetime
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    let seconds = dt.timestamp() as f64;
+                    return match_or_bind(object, seconds, bindings);
+                }
+                // Try parsing as Unix timestamp
+                if let Ok(secs) = dt_str.parse::<f64>() {
+                    return match_or_bind(object, secs, bindings);
+                }
+            }
+            // Reverse: seconds to datetime string
+            if let Some(secs) = get_number(object) {
+                if let Term::Variable(var) = subject {
+                    let dt = Utc.timestamp_opt(secs as i64, 0).single();
+                    if let Some(dt) = dt {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(var.clone(), Term::literal(dt.to_rfc3339()));
+                        return BuiltinResult::Success(new_bindings);
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:year - dateTimeString time:year year
+        self.register(&format!("{}year", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    return match_or_bind(object, dt.year() as f64, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:month - dateTimeString time:month month (1-12)
+        self.register(&format!("{}month", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    return match_or_bind(object, dt.month() as f64, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:day - dateTimeString time:day day (1-31)
+        self.register(&format!("{}day", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    return match_or_bind(object, dt.day() as f64, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:hour - dateTimeString time:hour hour (0-23)
+        self.register(&format!("{}hour", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    return match_or_bind(object, dt.hour() as f64, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:minute - dateTimeString time:minute minute (0-59)
+        self.register(&format!("{}minute", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    return match_or_bind(object, dt.minute() as f64, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:second - dateTimeString time:second second (0-59)
+        self.register(&format!("{}second", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    return match_or_bind(object, dt.second() as f64, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:dayOfWeek - dateTimeString time:dayOfWeek dayNum (0=Sunday, 6=Saturday)
+        self.register(&format!("{}dayOfWeek", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    // chrono uses Mon=0, Sun=6, but cwm uses Sun=0, Sat=6
+                    let dow = dt.weekday().num_days_from_sunday() as f64;
+                    return match_or_bind(object, dow, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:timeZone - dateTimeString time:timeZone tzOffsetMinutes
+        self.register(&format!("{}timeZone", ns::TIME), |subject, object, bindings| {
+            if let Some(dt_str) = get_string(subject) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&dt_str) {
+                    let offset_secs = dt.offset().local_minus_utc();
+                    let offset_mins = (offset_secs / 60) as f64;
+                    return match_or_bind(object, offset_mins, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:gmTime - secondsSinceEpoch time:gmTime dateTimeString (UTC)
+        self.register(&format!("{}gmTime", ns::TIME), |subject, object, bindings| {
+            if let Some(secs) = get_number(subject) {
+                if let Some(dt) = Utc.timestamp_opt(secs as i64, 0).single() {
+                    return match_or_bind_string(object, dt.to_rfc3339(), bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:localTime - secondsSinceEpoch time:localTime dateTimeString (local timezone)
+        self.register(&format!("{}localTime", ns::TIME), |subject, object, bindings| {
+            if let Some(secs) = get_number(subject) {
+                if let Some(dt) = Local.timestamp_opt(secs as i64, 0).single() {
+                    return match_or_bind_string(object, dt.to_rfc3339(), bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+    }
+
+    fn register_crypto(&mut self) {
+        // crypto:md5 - data crypto:md5 hash
+        self.register(&format!("{}md5", ns::CRYPTO), |subject, object, bindings| {
+            if let Some(data) = get_string(subject) {
+                let mut hasher = Md5::new();
+                hasher.update(data.as_bytes());
+                let result = hasher.finalize();
+                let hex = format!("{:x}", result);
+                return match_or_bind_string(object, hex, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // crypto:sha - data crypto:sha hash (SHA-256)
+        self.register(&format!("{}sha", ns::CRYPTO), |subject, object, bindings| {
+            if let Some(data) = get_string(subject) {
+                let mut hasher = Sha256::new();
+                hasher.update(data.as_bytes());
+                let result = hasher.finalize();
+                let hex = format!("{:x}", result);
+                return match_or_bind_string(object, hex, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // crypto:sha512 - data crypto:sha512 hash
+        self.register(&format!("{}sha512", ns::CRYPTO), |subject, object, bindings| {
+            if let Some(data) = get_string(subject) {
+                let mut hasher = Sha512::new();
+                hasher.update(data.as_bytes());
+                let result = hasher.finalize();
+                let hex = format!("{:x}", result);
+                return match_or_bind_string(object, hex, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+    }
+
+    fn register_os(&mut self) {
+        // os:environ - envVarName os:environ value
+        self.register(&format!("{}environ", ns::OS), |subject, object, bindings| {
+            if let Some(var_name) = get_string(subject) {
+                if let Ok(value) = std::env::var(&var_name) {
+                    return match_or_bind_string(object, value, bindings);
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // os:argv - index os:argv argumentValue
+        self.register(&format!("{}argv", ns::OS), |subject, object, bindings| {
+            if let Some(idx) = get_number(subject) {
+                let args: Vec<String> = std::env::args().collect();
+                let idx = idx as usize;
+                if idx < args.len() {
+                    return match_or_bind_string(object, args[idx].clone(), bindings);
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // os:baseAbsolute - relativePath os:baseAbsolute absolutePath
+        self.register(&format!("{}baseAbsolute", ns::OS), |subject, object, bindings| {
+            if let Some(rel_path) = get_string(subject) {
+                if let Ok(abs_path) = std::fs::canonicalize(&rel_path) {
+                    if let Some(path_str) = abs_path.to_str() {
+                        return match_or_bind_string(object, path_str.to_string(), bindings);
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // os:baseRelative - absolutePath os:baseRelative relativePath
+        self.register(&format!("{}baseRelative", ns::OS), |subject, object, bindings| {
+            if let Some(abs_path) = get_string(subject) {
+                if let Ok(cwd) = std::env::current_dir() {
+                    let abs = std::path::Path::new(&abs_path);
+                    if let Ok(rel) = abs.strip_prefix(&cwd) {
+                        if let Some(rel_str) = rel.to_str() {
+                            return match_or_bind_string(object, rel_str.to_string(), bindings);
                         }
                     }
                 }

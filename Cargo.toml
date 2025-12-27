@@ -30,6 +30,16 @@ fnv = "1"
 # Regex for string builtins
 regex = "1"
 
+# Time handling for time builtins
+chrono = "0.4"
+
+# Crypto for crypto builtins
+sha2 = "0.10"
+md-5 = "0.10"
+
+# HTTP for web fetching
+ureq = { version = "2", features = ["json"] }
+
 [dev-dependencies]
 pretty_assertions = "1"
 
