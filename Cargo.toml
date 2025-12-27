@@ -1,0 +1,39 @@
+[package]
+name = "cwm"
+version = "0.1.0"
+edition = "2021"
+description = "Closed World Machine - N3 reasoner and RDF processor"
+license = "W3C"
+keywords = ["rdf", "n3", "semantic-web", "reasoner", "logic"]
+categories = ["command-line-utilities", "science"]
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Parsing
+nom = "7"
+
+# Data structures
+indexmap = "2"
+
+# URIs
+percent-encoding = "2"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Hashing
+fnv = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[[bin]]
+name = "cwm"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true
