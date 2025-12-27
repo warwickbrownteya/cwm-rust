@@ -8,6 +8,22 @@
 //! - crypto: cryptographic functions
 //! - time: date and time operations
 //! - os: operating system functions
+//!
+//! # Architecture
+//!
+//! This module is being refactored into a modular namespace-based structure.
+//! See the submodules for the new trait-based implementations:
+//! - `helpers`: Shared utility functions
+//! - `math`: Math namespace builtins (new architecture)
+//!
+//! The legacy `BuiltinRegistry` maintains backward compatibility.
+
+// New modular architecture
+pub mod helpers;
+pub mod math;
+
+// Re-export namespace types
+pub use math::MathNamespace;
 
 use std::collections::HashMap;
 use regex::Regex;
