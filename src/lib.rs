@@ -44,6 +44,7 @@ pub mod parser;
 pub mod store;
 pub mod reasoner;
 pub mod builtins;
+pub mod sparql;
 
 // Re-export main types
 pub use term::{Term, Triple, Bindings, Uri, Literal, Datatype, BlankNode, Variable, List, FormulaRef};
@@ -51,3 +52,4 @@ pub use parser::{parse, ParseResult, ParseError, ParserState, Formula, N3Parser}
 pub use store::Store;
 pub use reasoner::{Reasoner, Rule, ReasonerConfig, ReasonerStats};
 pub use builtins::{BuiltinRegistry, BuiltinResult};
+pub use sparql::{execute_sparql, QueryResult, format_results_xml, format_results_json};

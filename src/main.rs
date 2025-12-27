@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indexmap::IndexMap;
 
-use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype};
+use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json};
 
 #[derive(Parser)]
 #[command(name = "cwm")]
@@ -130,6 +130,18 @@ struct Cli {
     /// Dereify statements (reverse reification)
     #[arg(long)]
     dereify: bool,
+
+    /// Execute SPARQL query from file
+    #[arg(long = "sparql", value_name = "QUERY_FILE")]
+    sparql: Option<PathBuf>,
+
+    /// Execute inline SPARQL query
+    #[arg(long = "sparql-query", value_name = "QUERY")]
+    sparql_query: Option<String>,
+
+    /// Output format for SPARQL results: xml, json
+    #[arg(long = "sparql-results", value_name = "FORMAT", default_value = "xml")]
+    sparql_results: String,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -347,6 +359,51 @@ fn main() -> Result<()> {
     // Apply dereification if requested
     if cli.dereify {
         output_store = dereify_store(&output_store);
+    }
+
+    // Execute SPARQL query if specified
+    if cli.sparql.is_some() || cli.sparql_query.is_some() {
+        let query_str = if let Some(query_file) = &cli.sparql {
+            fs::read_to_string(query_file)
+                .with_context(|| format!("Failed to read SPARQL query file: {}", query_file.display()))?
+        } else {
+            cli.sparql_query.clone().unwrap()
+        };
+
+        let result = execute_sparql(&output_store, &query_str)
+            .map_err(|e| anyhow::anyhow!("SPARQL error: {}", e))?;
+
+        // Format and output SPARQL results
+        let sparql_output = match cli.sparql_results.to_lowercase().as_str() {
+            "json" => format_results_json(&result),
+            _ => format_results_xml(&result),
+        };
+
+        // Handle CONSTRUCT queries - output as RDF
+        if let QueryResult::Graph(triples) = &result {
+            let mut result_store = Store::new();
+            for triple in triples {
+                result_store.add(triple.clone());
+            }
+            let rdf_output = format_n3(&result_store, &all_prefixes);
+            if let Some(output_path) = cli.output {
+                fs::write(&output_path, rdf_output)
+                    .with_context(|| format!("Failed to write to: {}", output_path.display()))?;
+            } else {
+                io::stdout().write_all(rdf_output.as_bytes())
+                    .context("Failed to write to stdout")?;
+            }
+        } else {
+            if let Some(output_path) = cli.output {
+                fs::write(&output_path, sparql_output)
+                    .with_context(|| format!("Failed to write to: {}", output_path.display()))?;
+            } else {
+                io::stdout().write_all(sparql_output.as_bytes())
+                    .context("Failed to write to stdout")?;
+            }
+        }
+
+        return Ok(());
     }
 
     // Suppress output if --no flag is set
