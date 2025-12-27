@@ -479,6 +479,202 @@ impl Reasoner {
     }
 }
 
+/// Stratification analysis for logic programs
+/// Determines if rules can be evaluated in a well-defined order
+#[derive(Clone, Debug)]
+pub struct StratificationResult {
+    /// Whether the program is stratified (has no cycles through negation)
+    pub is_stratified: bool,
+    /// Rule indices grouped by stratum (first stratum = 0)
+    pub strata: Vec<Vec<usize>>,
+    /// Warnings about potential issues
+    pub warnings: Vec<String>,
+}
+
+impl Reasoner {
+    /// Analyze rules for stratification
+    /// Returns information about rule ordering and any stratification issues
+    pub fn analyze_stratification(&self) -> StratificationResult {
+        let log_not_includes = "http://www.w3.org/2000/10/swap/log#notIncludes";
+
+        // Extract predicates from each rule
+        let mut rule_body_preds: Vec<HashSet<String>> = Vec::new();
+        let mut rule_head_preds: Vec<HashSet<String>> = Vec::new();
+        let mut rule_negated_preds: Vec<HashSet<String>> = Vec::new();
+
+        for rule in &self.rules {
+            let mut body = HashSet::new();
+            let mut head = HashSet::new();
+            let mut negated = HashSet::new();
+
+            // Extract predicates from antecedent
+            for triple in &rule.antecedent {
+                if let Term::Uri(uri) = &triple.predicate {
+                    let pred = uri.as_str().to_string();
+                    if pred == log_not_includes {
+                        // This is a negation - extract predicates from the formula argument
+                        if let Term::Formula(formula) = &triple.object {
+                            for inner in formula.triples() {
+                                if let Term::Uri(inner_uri) = &inner.predicate {
+                                    negated.insert(inner_uri.as_str().to_string());
+                                }
+                            }
+                        }
+                    } else {
+                        body.insert(pred);
+                    }
+                }
+            }
+
+            // Extract predicates from consequent
+            for triple in &rule.consequent {
+                if let Term::Uri(uri) = &triple.predicate {
+                    head.insert(uri.as_str().to_string());
+                }
+            }
+
+            rule_body_preds.push(body);
+            rule_head_preds.push(head);
+            rule_negated_preds.push(negated);
+        }
+
+        // Build dependency graph
+        // A rule R1 depends on R2 if R1's body mentions a predicate defined in R2's head
+        let mut dependencies: Vec<HashSet<usize>> = vec![HashSet::new(); self.rules.len()];
+        let mut neg_dependencies: Vec<HashSet<usize>> = vec![HashSet::new(); self.rules.len()];
+
+        for (i, body) in rule_body_preds.iter().enumerate() {
+            for (j, head) in rule_head_preds.iter().enumerate() {
+                if i != j {
+                    // Check if rule i depends on predicates defined by rule j
+                    if !body.is_disjoint(head) {
+                        dependencies[i].insert(j);
+                    }
+                }
+            }
+        }
+
+        for (i, negated) in rule_negated_preds.iter().enumerate() {
+            for (j, head) in rule_head_preds.iter().enumerate() {
+                if i != j {
+                    // Check if rule i negatively depends on predicates defined by rule j
+                    if !negated.is_disjoint(head) {
+                        neg_dependencies[i].insert(j);
+                    }
+                }
+            }
+        }
+
+        // Check for cycles through negation (non-stratified)
+        let mut warnings = Vec::new();
+        let mut is_stratified = true;
+
+        // Simple cycle detection through negative dependencies
+        for (i, neg_deps) in neg_dependencies.iter().enumerate() {
+            for &j in neg_deps {
+                // Check if j depends (transitively) on i
+                let mut visited = HashSet::new();
+                let mut stack = vec![j];
+                while let Some(current) = stack.pop() {
+                    if current == i {
+                        is_stratified = false;
+                        warnings.push(format!(
+                            "Non-stratified negation detected: rule {} negatively depends on rule {} which depends back on rule {}",
+                            i, j, i
+                        ));
+                        break;
+                    }
+                    if !visited.contains(&current) {
+                        visited.insert(current);
+                        stack.extend(&dependencies[current]);
+                    }
+                }
+            }
+        }
+
+        // Compute strata using topological sort
+        let mut strata: Vec<Vec<usize>> = Vec::new();
+        let mut assigned: HashSet<usize> = HashSet::new();
+
+        // First stratum: rules with no dependencies
+        let mut current_stratum: Vec<usize> = (0..self.rules.len())
+            .filter(|&i| dependencies[i].is_empty() && neg_dependencies[i].is_empty())
+            .collect();
+
+        if !current_stratum.is_empty() {
+            assigned.extend(&current_stratum);
+            strata.push(current_stratum);
+        }
+
+        // Subsequent strata: rules whose dependencies are all in previous strata
+        let max_iterations = self.rules.len() + 1;
+        for _ in 0..max_iterations {
+            if assigned.len() == self.rules.len() {
+                break;
+            }
+
+            let mut next_stratum: Vec<usize> = Vec::new();
+            for i in 0..self.rules.len() {
+                if assigned.contains(&i) {
+                    continue;
+                }
+                // All positive dependencies must be assigned
+                let pos_satisfied = dependencies[i].iter().all(|d| assigned.contains(d));
+                // All negative dependencies must be assigned
+                let neg_satisfied = neg_dependencies[i].iter().all(|d| assigned.contains(d));
+
+                if pos_satisfied && neg_satisfied {
+                    next_stratum.push(i);
+                }
+            }
+
+            if next_stratum.is_empty() {
+                // Remaining rules form a cycle
+                let remaining: Vec<usize> = (0..self.rules.len())
+                    .filter(|i| !assigned.contains(i))
+                    .collect();
+                warnings.push(format!(
+                    "Cyclic dependencies detected among rules: {:?}",
+                    remaining
+                ));
+                // Add them all to final stratum anyway
+                strata.push(remaining.clone());
+                assigned.extend(remaining);
+            } else {
+                assigned.extend(&next_stratum);
+                strata.push(next_stratum);
+            }
+        }
+
+        StratificationResult {
+            is_stratified,
+            strata,
+            warnings,
+        }
+    }
+
+    /// Reorder rules according to stratification analysis
+    /// Returns true if rules were reordered
+    pub fn stratify_rules(&mut self) -> bool {
+        let analysis = self.analyze_stratification();
+
+        if analysis.strata.len() <= 1 {
+            return false; // No reordering needed
+        }
+
+        // Collect rules in stratified order
+        let mut new_order: Vec<Rule> = Vec::with_capacity(self.rules.len());
+        for stratum in &analysis.strata {
+            for &idx in stratum {
+                new_order.push(self.rules[idx].clone());
+            }
+        }
+
+        self.rules = new_order;
+        true
+    }
+}
+
 impl Default for Reasoner {
     fn default() -> Self {
         Self::new()
