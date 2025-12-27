@@ -1,0 +1,11 @@
+@prefix ex: <http://example.org/> .
+
+ex:alice ex:address [
+    ex:street "123 Main St" ;
+    ex:city "London" ;
+    ex:country "UK"
+] .
+
+ex:bob ex:address _:addr1 .
+_:addr1 ex:city "Paris" ;
+        ex:country "France" .

@@ -1,0 +1,6 @@
+@prefix ex: <http://example.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+ex:primaryColors rdf:value (ex:red ex:green ex:blue) .
+ex:numbers rdf:value (1 2 3 4 5) .
+ex:mixed rdf:value ("hello" 42 ex:world) .

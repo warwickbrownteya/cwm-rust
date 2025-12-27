@@ -1,0 +1,12 @@
+@prefix ex: <http://example.org/> .
+
+ex:alice ex:knows ex:bob .
+ex:bob ex:knows ex:charlie .
+ex:charlie ex:knows ex:david .
+
+ex:alice a ex:Person .
+ex:bob a ex:Person .
+ex:charlie a ex:Person .
+ex:david a ex:Person .
+
+{ ?x ex:knows ?y . ?y ex:knows ?z } => { ?x ex:knowsIndirectly ?z } .

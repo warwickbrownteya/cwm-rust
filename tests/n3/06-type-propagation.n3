@@ -1,0 +1,13 @@
+@prefix ex: <http://example.org/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:fido a ex:Dog .
+ex:tweety a ex:Bird .
+ex:nemo a ex:Fish .
+
+ex:Dog rdfs:subClassOf ex:Animal .
+ex:Bird rdfs:subClassOf ex:Animal .
+ex:Fish rdfs:subClassOf ex:Animal .
+ex:Animal rdfs:subClassOf ex:LivingThing .
+
+{ ?x a ?class . ?class rdfs:subClassOf ?super } => { ?x a ?super } .

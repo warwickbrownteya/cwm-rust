@@ -1,0 +1,7 @@
+@prefix ex: <http://example.org/> .
+
+ex:alice ex:marriedTo ex:bob .
+ex:charlie ex:friendOf ex:david .
+
+{ ?x ex:marriedTo ?y } => { ?y ex:marriedTo ?x } .
+{ ?x ex:friendOf ?y } => { ?y ex:friendOf ?x } .

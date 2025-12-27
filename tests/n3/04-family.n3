@@ -1,0 +1,10 @@
+@prefix : <http://example.org/family#> .
+
+:john a :Male ; :hasChild :alice, :bob .
+:mary a :Female ; :hasChild :alice, :bob .
+:alice a :Female .
+:bob a :Male .
+
+{ ?x :hasChild ?y } => { ?y :hasParent ?x } .
+{ ?x :hasChild ?y . ?x a :Male } => { ?x a :Father } .
+{ ?x :hasChild ?y . ?x a :Female } => { ?x a :Mother } .

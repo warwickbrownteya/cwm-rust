@@ -1,0 +1,8 @@
+@prefix ex: <http://example.org/> .
+
+ex:a ex:next ex:b .
+ex:b ex:next ex:c .
+ex:c ex:next ex:d .
+ex:d ex:next ex:e .
+
+{ ?x ex:next ?y . ?y ex:next ?z } => { ?x ex:skip ?z } .

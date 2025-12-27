@@ -1,0 +1,7 @@
+@prefix ex: <http://example.org/> .
+
+ex:socrates a ex:Human .
+ex:plato a ex:Human .
+ex:aristotle a ex:Human .
+
+{ ?x a ex:Human } => { ?x a ex:Mortal } .
