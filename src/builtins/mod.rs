@@ -17,7 +17,8 @@ use sha1::Sha1;
 use md5::Md5;
 use hmac::{Hmac, Mac};
 use base64::{Engine as _, engine::general_purpose};
-use crate::term::{Term, Bindings, uri::ns};
+use crate::term::{Term, Bindings, uri::ns, FormulaRef};
+use crate::parser;
 
 // Re-export ureq for web fetching
 use ureq;
@@ -1837,8 +1838,7 @@ impl BuiltinRegistry {
         });
 
         // log:semantics - uri log:semantics formula (loads and parses document)
-        // Note: This is a simplified implementation that returns empty formula
-        // Full implementation would require parser integration
+        // Fetches the document at URI and parses it as N3, returning the formula
         self.register(&format!("{}semantics", ns::LOG), |subject, object, bindings| {
             if let Term::Uri(uri) = subject {
                 let uri_str = uri.as_str();
@@ -1850,14 +1850,26 @@ impl BuiltinRegistry {
                     std::fs::read_to_string(uri_str).ok()
                 };
 
-                if let Some(_content) = content {
-                    // Return an empty formula as placeholder
-                    // Full implementation would parse the content
-                    let result = Term::Formula(crate::term::FormulaRef::new(0, Vec::new()));
-                    if let Term::Variable(var) = object {
-                        let mut new_bindings = bindings.clone();
-                        new_bindings.insert(var.clone(), result);
-                        return BuiltinResult::Success(new_bindings);
+                if let Some(content) = content {
+                    // Parse the content using the N3 parser
+                    match parser::parse(&content) {
+                        Ok(parse_result) => {
+                            let result = Term::Formula(FormulaRef::new(0, parse_result.triples));
+                            if let Term::Variable(var) = object {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), result);
+                                return BuiltinResult::Success(new_bindings);
+                            } else if let Term::Formula(obj_formula) = object {
+                                if let Term::Formula(res_formula) = &result {
+                                    if res_formula.triples() == obj_formula.triples() {
+                                        return BuiltinResult::Success(bindings.clone());
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            return BuiltinResult::Failure;
+                        }
                     }
                 }
             }
@@ -1903,16 +1915,31 @@ impl BuiltinRegistry {
         });
 
         // log:parsedAsN3 - stringContent log:parsedAsN3 formula
-        // Note: Requires parser integration - placeholder implementation
+        // Parses N3 string content into a formula
         self.register(&format!("{}parsedAsN3", ns::LOG), |subject, object, bindings| {
-            if let Some(_content) = get_string(subject) {
-                // Placeholder: return empty formula
-                // Full implementation would parse the N3 content
-                let result = Term::Formula(crate::term::FormulaRef::new(0, Vec::new()));
-                if let Term::Variable(var) = object {
-                    let mut new_bindings = bindings.clone();
-                    new_bindings.insert(var.clone(), result);
-                    return BuiltinResult::Success(new_bindings);
+            if let Some(content) = get_string(subject) {
+                // Parse the N3 content using the parser
+                match parser::parse(&content) {
+                    Ok(parse_result) => {
+                        // Create a formula from the parsed triples
+                        let result = Term::Formula(FormulaRef::new(0, parse_result.triples));
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if let Term::Formula(obj_formula) = object {
+                            // Check if formulas match (same triples)
+                            if let Term::Formula(res_formula) = &result {
+                                if res_formula.triples() == obj_formula.triples() {
+                                    return BuiltinResult::Success(bindings.clone());
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Parse error - return failure
+                        return BuiltinResult::Failure;
+                    }
                 }
             }
             BuiltinResult::NotReady
@@ -1934,12 +1961,19 @@ impl BuiltinRegistry {
                 };
 
                 let result = match content_result {
-                    Ok(_content) => {
-                        // Return empty formula as placeholder (would parse content)
-                        Term::Formula(crate::term::FormulaRef::new(0, Vec::new()))
+                    Ok(content) => {
+                        // Parse the content using the N3 parser
+                        match parser::parse(&content) {
+                            Ok(parse_result) => {
+                                Term::Formula(FormulaRef::new(0, parse_result.triples))
+                            }
+                            Err(e) => {
+                                Term::literal(format!("Parse error: {}", e))
+                            }
+                        }
                     }
                     Err(e) => {
-                        Term::literal(format!("Error: {}", e))
+                        Term::literal(format!("Fetch error: {}", e))
                     }
                 };
 
@@ -1976,6 +2010,91 @@ impl BuiltinRegistry {
             // Would need reasoner integration
             if let (Term::Formula(_), Term::Formula(_)) = (subject, object) {
                 return BuiltinResult::Success(bindings.clone());
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:conjunction - list log:conjunction formula (merges formulas via AND)
+        // Takes a list of formulas and returns their conjunction (union of triples)
+        self.register(&format!("{}conjunction", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let mut all_triples = Vec::new();
+                for item in list.iter() {
+                    if let Term::Formula(formula) = item {
+                        all_triples.extend(formula.triples().to_vec());
+                    } else {
+                        return BuiltinResult::NotReady;
+                    }
+                }
+                let result = Term::Formula(FormulaRef::new(0, all_triples));
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), result);
+                    return BuiltinResult::Success(new_bindings);
+                } else if let Term::Formula(obj_formula) = object {
+                    if let Term::Formula(res_formula) = &result {
+                        if res_formula.triples() == obj_formula.triples() {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:dtlit - (value datatypeUri) log:dtlit typedLiteral
+        // Creates a typed literal from a value string and datatype URI
+        self.register(&format!("{}dtlit", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(value), Term::Uri(dt_uri)) = (get_string(&items[0]), &items[1]) {
+                        let result = Term::typed_literal(value, dt_uri.as_str());
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if result == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:rawType - term log:rawType typeUri
+        // Returns the low-level type: Formula, Literal, List, BlankNode, Uri, Variable
+        self.register(&format!("{}rawType", ns::LOG), |subject, object, bindings| {
+            let type_uri = match subject {
+                Term::Formula(_) => format!("{}Formula", ns::LOG),
+                Term::Literal(_) => format!("{}Literal", ns::LOG),
+                Term::List(_) => format!("{}List", ns::LOG),
+                Term::BlankNode(_) => format!("{}BlankNode", ns::LOG),
+                Term::Uri(_) => format!("{}Uri", ns::LOG),
+                Term::Variable(_) => format!("{}Variable", ns::LOG),
+            };
+            let result = Term::uri(&type_uri);
+            if let Term::Variable(var) = object {
+                let mut new_bindings = bindings.clone();
+                new_bindings.insert(var.clone(), result);
+                return BuiltinResult::Success(new_bindings);
+            } else if result == *object {
+                return BuiltinResult::Success(bindings.clone());
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:content - document log:content string
+        // For a formula, serializes it back to N3 string
+        self.register(&format!("{}content", ns::LOG), |subject, object, bindings| {
+            if let Term::Formula(formula) = subject {
+                // Simple serialization of triples
+                let mut content = String::new();
+                for triple in formula.triples() {
+                    content.push_str(&format!("{} {} {} .\n", triple.subject, triple.predicate, triple.object));
+                }
+                return match_or_bind_string(object, content, bindings);
             }
             BuiltinResult::NotReady
         });
@@ -3519,6 +3638,127 @@ impl BuiltinRegistry {
                         return match_or_bind_string(object, text, bindings);
                     }
                 }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // crypto:hashFunction - algorithm crypto:hashFunction true (tests if secure hash)
+        self.register(&format!("{}hashFunction", ns::CRYPTO), |subject, _object, _bindings| {
+            if let Some(algo) = get_string(subject) {
+                let algo_lower = algo.to_lowercase();
+                let is_secure = matches!(algo_lower.as_str(),
+                    "sha256" | "sha-256" | "sha512" | "sha-512" | "sha384" | "sha-384" |
+                    "sha3-256" | "sha3-384" | "sha3-512" | "blake2b" | "blake2s"
+                );
+                if is_secure {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // crypto:keyLength - key crypto:keyLength length (returns key length in bits)
+        self.register(&format!("{}keyLength", ns::CRYPTO), |subject, object, bindings| {
+            if let Some(key) = get_string(subject) {
+                // Assume hex-encoded key, each char = 4 bits
+                let length = if key.chars().all(|c| c.is_ascii_hexdigit()) {
+                    (key.len() * 4) as f64
+                } else {
+                    // Raw bytes, each byte = 8 bits
+                    (key.len() * 8) as f64
+                };
+                return match_or_bind(object, length, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // crypto:publicKeyObject - term crypto:publicKeyObject true (tests if term is a key)
+        // For simplicity, test if it looks like a hex string of appropriate length
+        self.register(&format!("{}publicKeyObject", ns::CRYPTO), |subject, _object, _bindings| {
+            if let Some(key) = get_string(subject) {
+                // RSA 2048 public key is ~512 hex chars, ECDSA P-256 is ~128 hex chars
+                if key.len() >= 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // crypto:canSign - key crypto:canSign true (tests if key can sign)
+        // Private keys can sign; detect by checking if key material is longer
+        self.register(&format!("{}canSign", ns::CRYPTO), |subject, _object, _bindings| {
+            if let Some(key) = get_string(subject) {
+                // Private keys are typically longer than public keys
+                // RSA 2048 private key is ~2000+ hex chars
+                if key.len() >= 1024 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // crypto:canEncrypt - key crypto:canEncrypt true (tests if key can encrypt)
+        // Public keys can encrypt; any valid key material can encrypt
+        self.register(&format!("{}canEncrypt", ns::CRYPTO), |subject, _object, _bindings| {
+            if let Some(key) = get_string(subject) {
+                if key.len() >= 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // crypto:hasPrivate - keypair crypto:hasPrivate true (tests if keypair has private component)
+        self.register(&format!("{}hasPrivate", ns::CRYPTO), |subject, _object, _bindings| {
+            if let Some(key) = get_string(subject) {
+                // Private key material is typically longer
+                if key.len() >= 1024 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // crypto:hexEncode - data crypto:hexEncode hexString
+        self.register(&format!("{}hexEncode", ns::CRYPTO), |subject, object, bindings| {
+            if let Some(data) = get_string(subject) {
+                let hex: String = data.bytes().map(|b| format!("{:02x}", b)).collect();
+                return match_or_bind_string(object, hex, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // crypto:hexDecode - hexString crypto:hexDecode data
+        self.register(&format!("{}hexDecode", ns::CRYPTO), |subject, object, bindings| {
+            if let Some(hex) = get_string(subject) {
+                let bytes: Result<Vec<u8>, _> = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i+2], 16))
+                    .collect();
+                if let Ok(bytes) = bytes {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        return match_or_bind_string(object, text, bindings);
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // crypto:randomBytes - count crypto:randomBytes hexBytes
+        self.register(&format!("{}randomBytes", ns::CRYPTO), |subject, object, bindings| {
+            if let Some(count) = get_number(subject) {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let count = count as usize;
+                // Simple pseudo-random (not cryptographically secure in this impl)
+                let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                let mut bytes = Vec::with_capacity(count);
+                let mut state = seed;
+                for _ in 0..count {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    bytes.push((state >> 32) as u8);
+                }
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                return match_or_bind_string(object, hex, bindings);
             }
             BuiltinResult::NotReady
         });
