@@ -1,22 +1,55 @@
 //! RDF/N3 Store (Formula) implementation
 //!
 //! A store holds a set of triples and supports pattern matching.
+//!
+//! # Indexing Strategy
+//!
+//! The store uses SPO (Subject-Predicate-Object) indexes for efficient pattern matching:
+//! - O(1) lookup for exact triples
+//! - O(log n) to O(1) lookup for patterns with bound terms
+//! - Falls back to O(n) scan only when all positions are variables
 
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use indexmap::IndexMap;
 
 use crate::term::{Term, Triple, Bindings, FormulaRef, substitute_triple};
+use crate::core::TripleStore;
+
+/// Compute a hash for a term (for indexing)
+fn term_hash(term: &Term) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    term.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Compute a hash for a triple (for duplicate detection)
+fn triple_hash(triple: &Triple) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    triple.subject.hash(&mut hasher);
+    triple.predicate.hash(&mut hasher);
+    triple.object.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// A store of RDF triples (also called a formula or graph)
+///
+/// Implements the `TripleStore` trait with O(1) duplicate detection
+/// and efficient pattern matching using SPO indexes.
 #[derive(Clone, Default)]
 pub struct Store {
     /// The triples in this store
     triples: Vec<Triple>,
-    /// Index by subject
-    by_subject: IndexMap<u64, Vec<usize>>,
-    /// Index by predicate
-    by_predicate: IndexMap<u64, Vec<usize>>,
-    /// Index by object
-    by_object: IndexMap<u64, Vec<usize>>,
+    /// Hash set for O(1) duplicate detection
+    triple_hashes: HashSet<u64>,
+    /// Index by subject hash -> triple indices
+    by_subject: HashMap<u64, Vec<usize>>,
+    /// Index by predicate hash -> triple indices
+    by_predicate: HashMap<u64, Vec<usize>>,
+    /// Index by object hash -> triple indices
+    by_object: HashMap<u64, Vec<usize>>,
     /// Next formula ID
     next_formula_id: u64,
     /// Nested formulas
@@ -29,15 +62,35 @@ impl Store {
         Self::default()
     }
 
-    /// Add a triple to the store
+    /// Add a triple to the store with O(1) duplicate detection and index updates
     pub fn add(&mut self, triple: Triple) {
-        // Check for duplicates
-        if self.contains(&triple) {
-            return;
+        let hash = triple_hash(&triple);
+
+        // O(1) duplicate check
+        if self.triple_hashes.contains(&hash) {
+            // Hash collision possible - verify with exact check
+            if self.triples.iter().any(|t| t == &triple) {
+                return;
+            }
         }
 
+        // Insert into hash set
+        self.triple_hashes.insert(hash);
+
+        // Get the index for this triple
+        let idx = self.triples.len();
+
+        // Update SPO indexes
+        let subj_hash = term_hash(&triple.subject);
+        let pred_hash = term_hash(&triple.predicate);
+        let obj_hash = term_hash(&triple.object);
+
+        self.by_subject.entry(subj_hash).or_default().push(idx);
+        self.by_predicate.entry(pred_hash).or_default().push(idx);
+        self.by_object.entry(obj_hash).or_default().push(idx);
+
+        // Add the triple
         self.triples.push(triple);
-        // TODO: Update indexes for efficient lookups
     }
 
     /// Add multiple triples
@@ -47,8 +100,13 @@ impl Store {
         }
     }
 
-    /// Check if the store contains a triple
+    /// Check if the store contains a triple (O(1) average case)
     pub fn contains(&self, triple: &Triple) -> bool {
+        let hash = triple_hash(triple);
+        if !self.triple_hashes.contains(&hash) {
+            return false;
+        }
+        // Hash collision possible - verify with exact check
         self.triples.iter().any(|t| t == triple)
     }
 
@@ -68,16 +126,65 @@ impl Store {
     }
 
     /// Match a pattern against the store, returning all bindings
+    ///
+    /// Uses indexes for efficient lookup when pattern has bound terms:
+    /// - If subject is bound, uses by_subject index
+    /// - If predicate is bound, uses by_predicate index
+    /// - If object is bound, uses by_object index
+    /// - Chooses the most selective (smallest candidate set)
     pub fn match_pattern(&self, pattern: &Triple) -> Vec<Bindings> {
-        let mut results = Vec::new();
+        // Get candidate indices from the most selective index
+        let candidates = self.get_candidates(pattern);
 
-        for triple in &self.triples {
-            if let Some(bindings) = self.unify_triple(pattern, triple) {
-                results.push(bindings);
+        let mut results = Vec::new();
+        for &idx in &candidates {
+            if let Some(triple) = self.triples.get(idx) {
+                if let Some(bindings) = self.unify_triple(pattern, triple) {
+                    results.push(bindings);
+                }
             }
         }
 
         results
+    }
+
+    /// Get candidate triple indices using the most selective index
+    fn get_candidates(&self, pattern: &Triple) -> Vec<usize> {
+        let subj_bound = !matches!(pattern.subject, Term::Variable(_));
+        let pred_bound = !matches!(pattern.predicate, Term::Variable(_));
+        let obj_bound = !matches!(pattern.object, Term::Variable(_));
+
+        // If nothing is bound, scan all triples
+        if !subj_bound && !pred_bound && !obj_bound {
+            return (0..self.triples.len()).collect();
+        }
+
+        // Get candidates from each bound index
+        let mut candidate_sets: Vec<Option<&Vec<usize>>> = Vec::new();
+
+        if subj_bound {
+            let hash = term_hash(&pattern.subject);
+            candidate_sets.push(self.by_subject.get(&hash));
+        }
+        if pred_bound {
+            let hash = term_hash(&pattern.predicate);
+            candidate_sets.push(self.by_predicate.get(&hash));
+        }
+        if obj_bound {
+            let hash = term_hash(&pattern.object);
+            candidate_sets.push(self.by_object.get(&hash));
+        }
+
+        // Find the smallest non-empty candidate set
+        let smallest = candidate_sets
+            .into_iter()
+            .flatten()
+            .min_by_key(|v| v.len());
+
+        match smallest {
+            Some(indices) => indices.clone(),
+            None => Vec::new(), // No matches possible
+        }
     }
 
     /// Try to unify a pattern triple with a ground triple
@@ -165,18 +272,48 @@ impl Store {
     }
 
     /// Remove a triple from the store
+    ///
+    /// Note: This is O(n) as it requires rebuilding indexes.
+    /// For frequent removals, consider using a different data structure.
     pub fn remove(&mut self, triple: &Triple) -> bool {
         if let Some(pos) = self.triples.iter().position(|t| t == triple) {
+            // Remove from hash set
+            let hash = triple_hash(triple);
+            self.triple_hashes.remove(&hash);
+
+            // Remove the triple
             self.triples.remove(pos);
+
+            // Rebuild indexes (simpler than trying to update in place)
+            self.rebuild_indexes();
+
             true
         } else {
             false
         }
     }
 
-    /// Clear all triples
+    /// Rebuild all indexes from scratch
+    fn rebuild_indexes(&mut self) {
+        self.by_subject.clear();
+        self.by_predicate.clear();
+        self.by_object.clear();
+
+        for (idx, triple) in self.triples.iter().enumerate() {
+            let subj_hash = term_hash(&triple.subject);
+            let pred_hash = term_hash(&triple.predicate);
+            let obj_hash = term_hash(&triple.object);
+
+            self.by_subject.entry(subj_hash).or_default().push(idx);
+            self.by_predicate.entry(pred_hash).or_default().push(idx);
+            self.by_object.entry(obj_hash).or_default().push(idx);
+        }
+    }
+
+    /// Clear all triples and indexes
     pub fn clear(&mut self) {
         self.triples.clear();
+        self.triple_hashes.clear();
         self.by_subject.clear();
         self.by_predicate.clear();
         self.by_object.clear();
@@ -185,6 +322,33 @@ impl Store {
     /// Iterate over all triples
     pub fn iter(&self) -> impl Iterator<Item = &Triple> {
         self.triples.iter()
+    }
+}
+
+// Implement the TripleStore trait for Store
+impl TripleStore for Store {
+    fn add(&mut self, triple: Triple) {
+        Store::add(self, triple)
+    }
+
+    fn remove(&mut self, triple: &Triple) -> bool {
+        Store::remove(self, triple)
+    }
+
+    fn contains(&self, triple: &Triple) -> bool {
+        Store::contains(self, triple)
+    }
+
+    fn len(&self) -> usize {
+        Store::len(self)
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = &Triple> + '_> {
+        Box::new(self.triples.iter())
+    }
+
+    fn clear(&mut self) {
+        Store::clear(self)
     }
 }
 
