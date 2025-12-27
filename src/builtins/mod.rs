@@ -95,13 +95,37 @@ impl BuiltinRegistry {
 
     fn register_math(&mut self) {
         // math:sum - (a b) math:sum c means a + b = c
+        // BIDIRECTIONAL: can solve for any one unknown
         self.register(&format!("{}sum", ns::MATH), |subject, object, bindings| {
             if let Term::List(list) = subject {
                 let items = list.to_vec();
                 if items.len() == 2 {
-                    if let (Some(a), Some(b)) = (get_number(&items[0]), get_number(&items[1])) {
-                        let sum = a + b;
-                        return match_or_bind(object, sum, bindings);
+                    let a_val = get_number(&items[0]);
+                    let b_val = get_number(&items[1]);
+                    let c_val = get_number(object);
+
+                    match (a_val, b_val, c_val) {
+                        // Forward: a + b = ?c
+                        (Some(a), Some(b), _) => {
+                            return match_or_bind(object, a + b, bindings);
+                        }
+                        // Backward: ?a + b = c → a = c - b
+                        (None, Some(b), Some(c)) => {
+                            if let Term::Variable(var) = &items[0] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((c - b).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        // Backward: a + ?b = c → b = c - a
+                        (Some(a), None, Some(c)) => {
+                            if let Term::Variable(var) = &items[1] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((c - a).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -109,13 +133,37 @@ impl BuiltinRegistry {
         });
 
         // math:difference - (a b) math:difference c means a - b = c
+        // BIDIRECTIONAL: can solve for any one unknown
         self.register(&format!("{}difference", ns::MATH), |subject, object, bindings| {
             if let Term::List(list) = subject {
                 let items = list.to_vec();
                 if items.len() == 2 {
-                    if let (Some(a), Some(b)) = (get_number(&items[0]), get_number(&items[1])) {
-                        let diff = a - b;
-                        return match_or_bind(object, diff, bindings);
+                    let a_val = get_number(&items[0]);
+                    let b_val = get_number(&items[1]);
+                    let c_val = get_number(object);
+
+                    match (a_val, b_val, c_val) {
+                        // Forward: a - b = ?c
+                        (Some(a), Some(b), _) => {
+                            return match_or_bind(object, a - b, bindings);
+                        }
+                        // Backward: ?a - b = c → a = c + b
+                        (None, Some(b), Some(c)) => {
+                            if let Term::Variable(var) = &items[0] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((c + b).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        // Backward: a - ?b = c → b = a - c
+                        (Some(a), None, Some(c)) => {
+                            if let Term::Variable(var) = &items[1] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((a - c).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -123,13 +171,37 @@ impl BuiltinRegistry {
         });
 
         // math:product - (a b) math:product c means a * b = c
+        // BIDIRECTIONAL: can solve for any one unknown (when divisor ≠ 0)
         self.register(&format!("{}product", ns::MATH), |subject, object, bindings| {
             if let Term::List(list) = subject {
                 let items = list.to_vec();
                 if items.len() == 2 {
-                    if let (Some(a), Some(b)) = (get_number(&items[0]), get_number(&items[1])) {
-                        let prod = a * b;
-                        return match_or_bind(object, prod, bindings);
+                    let a_val = get_number(&items[0]);
+                    let b_val = get_number(&items[1]);
+                    let c_val = get_number(object);
+
+                    match (a_val, b_val, c_val) {
+                        // Forward: a * b = ?c
+                        (Some(a), Some(b), _) => {
+                            return match_or_bind(object, a * b, bindings);
+                        }
+                        // Backward: ?a * b = c → a = c / b (if b ≠ 0)
+                        (None, Some(b), Some(c)) if b != 0.0 => {
+                            if let Term::Variable(var) = &items[0] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((c / b).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        // Backward: a * ?b = c → b = c / a (if a ≠ 0)
+                        (Some(a), None, Some(c)) if a != 0.0 => {
+                            if let Term::Variable(var) = &items[1] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((c / a).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -137,15 +209,37 @@ impl BuiltinRegistry {
         });
 
         // math:quotient - (a b) math:quotient c means a / b = c
+        // BIDIRECTIONAL: can solve for any one unknown
         self.register(&format!("{}quotient", ns::MATH), |subject, object, bindings| {
             if let Term::List(list) = subject {
                 let items = list.to_vec();
                 if items.len() == 2 {
-                    if let (Some(a), Some(b)) = (get_number(&items[0]), get_number(&items[1])) {
-                        if b != 0.0 {
-                            let quot = a / b;
-                            return match_or_bind(object, quot, bindings);
+                    let a_val = get_number(&items[0]);
+                    let b_val = get_number(&items[1]);
+                    let c_val = get_number(object);
+
+                    match (a_val, b_val, c_val) {
+                        // Forward: a / b = ?c (if b ≠ 0)
+                        (Some(a), Some(b), _) if b != 0.0 => {
+                            return match_or_bind(object, a / b, bindings);
                         }
+                        // Backward: ?a / b = c → a = c * b
+                        (None, Some(b), Some(c)) => {
+                            if let Term::Variable(var) = &items[0] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((c * b).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        // Backward: a / ?b = c → b = a / c (if c ≠ 0)
+                        (Some(a), None, Some(c)) if c != 0.0 => {
+                            if let Term::Variable(var) = &items[1] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((a / c).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -269,13 +363,37 @@ impl BuiltinRegistry {
         });
 
         // math:exponentiation - (a b) math:exponentiation c means a^b = c
+        // BIDIRECTIONAL: can solve for base or exponent using logarithms
         self.register(&format!("{}exponentiation", ns::MATH), |subject, object, bindings| {
             if let Term::List(list) = subject {
                 let items = list.to_vec();
                 if items.len() == 2 {
-                    if let (Some(a), Some(b)) = (get_number(&items[0]), get_number(&items[1])) {
-                        let result = a.powf(b);
-                        return match_or_bind(object, result, bindings);
+                    let a_val = get_number(&items[0]); // base
+                    let b_val = get_number(&items[1]); // exponent
+                    let c_val = get_number(object);    // result
+
+                    match (a_val, b_val, c_val) {
+                        // Forward: a^b = ?c
+                        (Some(a), Some(b), _) => {
+                            return match_or_bind(object, a.powf(b), bindings);
+                        }
+                        // Backward: ?a^b = c → a = c^(1/b) (if b ≠ 0)
+                        (None, Some(b), Some(c)) if b != 0.0 && c > 0.0 => {
+                            if let Term::Variable(var) = &items[0] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal(c.powf(1.0/b).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        // Backward: a^?b = c → b = log_a(c) = ln(c)/ln(a) (if a > 0, a ≠ 1, c > 0)
+                        (Some(a), None, Some(c)) if a > 0.0 && a != 1.0 && c > 0.0 => {
+                            if let Term::Variable(var) = &items[1] {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), Term::typed_literal((c.ln() / a.ln()).to_string(), "http://www.w3.org/2001/XMLSchema#decimal"));
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -781,10 +899,53 @@ impl BuiltinRegistry {
     }
 
     fn register_string(&mut self) {
-        // string:concatenation - (a b) string:concatenation c
+        // string:concatenation - (a b ...) string:concatenation c
+        // BIDIRECTIONAL: for 2-element lists, can solve for one unknown part
         self.register(&format!("{}concatenation", ns::STRING), |subject, object, bindings| {
             if let Term::List(list) = subject {
                 let items = list.to_vec();
+
+                // Special case: 2 elements with one variable - bidirectional
+                if items.len() == 2 {
+                    let a_str = get_string(&items[0]);
+                    let b_str = get_string(&items[1]);
+                    let c_str = get_string(object);
+
+                    match (a_str, b_str, c_str) {
+                        // Forward: "a" + "b" = ?c
+                        (Some(a), Some(b), _) => {
+                            let result = format!("{}{}", a, b);
+                            return match_or_bind_string(object, result, bindings);
+                        }
+                        // Backward: ?a + "b" = "c" → a = c[..len(c)-len(b)] if c ends with b
+                        (None, Some(b), Some(c)) => {
+                            if c.ends_with(&b) && c.len() >= b.len() {
+                                if let Term::Variable(var) = &items[0] {
+                                    let a = c[..c.len() - b.len()].to_string();
+                                    let mut new_bindings = bindings.clone();
+                                    new_bindings.insert(var.clone(), Term::Literal(std::sync::Arc::new(crate::term::Literal::plain(a))));
+                                    return BuiltinResult::Success(new_bindings);
+                                }
+                            }
+                            return BuiltinResult::Failure;
+                        }
+                        // Backward: "a" + ?b = "c" → b = c[len(a)..] if c starts with a
+                        (Some(a), None, Some(c)) => {
+                            if c.starts_with(&a) {
+                                if let Term::Variable(var) = &items[1] {
+                                    let b = c[a.len()..].to_string();
+                                    let mut new_bindings = bindings.clone();
+                                    new_bindings.insert(var.clone(), Term::Literal(std::sync::Arc::new(crate::term::Literal::plain(b))));
+                                    return BuiltinResult::Success(new_bindings);
+                                }
+                            }
+                            return BuiltinResult::Failure;
+                        }
+                        _ => return BuiltinResult::NotReady,
+                    }
+                }
+
+                // General case: all parts must be bound
                 let mut result = String::new();
                 for item in items {
                     if let Some(s) = get_string(&item) {
@@ -3236,6 +3397,235 @@ impl BuiltinRegistry {
                             }
                         }
                     }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:flatten - nestedList list:flatten flatList
+        // Flattens one level of nesting
+        self.register(&format!("{}flatten", ns::LIST), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let mut flattened = Vec::new();
+                for item in list.iter() {
+                    if let Term::List(inner) = item {
+                        flattened.extend(inner.iter().cloned());
+                    } else {
+                        flattened.push(item.clone());
+                    }
+                }
+                let result = Term::list(flattened);
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), result);
+                    return BuiltinResult::Success(new_bindings);
+                } else if result == *object {
+                    return BuiltinResult::Success(bindings.clone());
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:take - (list n) list:take firstN
+        // Takes first n elements from list
+        self.register(&format!("{}take", ns::LIST), |subject, object, bindings| {
+            if let Term::List(pair) = subject {
+                let items = pair.to_vec();
+                if items.len() == 2 {
+                    if let (Term::List(list), Some(n)) = (&items[0], get_number(&items[1])) {
+                        let n = n as usize;
+                        let taken: Vec<Term> = list.iter().take(n).cloned().collect();
+                        let result = Term::list(taken);
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if result == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:drop - (list n) list:drop rest
+        // Drops first n elements from list
+        self.register(&format!("{}drop", ns::LIST), |subject, object, bindings| {
+            if let Term::List(pair) = subject {
+                let items = pair.to_vec();
+                if items.len() == 2 {
+                    if let (Term::List(list), Some(n)) = (&items[0], get_number(&items[1])) {
+                        let n = n as usize;
+                        let dropped: Vec<Term> = list.iter().skip(n).cloned().collect();
+                        let result = Term::list(dropped);
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if result == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:splitAt - (list n) list:splitAt (before after)
+        // Splits list at index n
+        self.register(&format!("{}splitAt", ns::LIST), |subject, object, bindings| {
+            if let Term::List(pair) = subject {
+                let items = pair.to_vec();
+                if items.len() == 2 {
+                    if let (Term::List(list), Some(n)) = (&items[0], get_number(&items[1])) {
+                        let n = n as usize;
+                        let before: Vec<Term> = list.iter().take(n).cloned().collect();
+                        let after: Vec<Term> = list.iter().skip(n).cloned().collect();
+                        let result = Term::list(vec![Term::list(before), Term::list(after)]);
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if result == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:intersperse - (list element) list:intersperse result
+        // Puts element between each adjacent pair in list
+        self.register(&format!("{}intersperse", ns::LIST), |subject, object, bindings| {
+            if let Term::List(pair) = subject {
+                let items = pair.to_vec();
+                if items.len() == 2 {
+                    if let Term::List(list) = &items[0] {
+                        let sep = items[1].clone();
+                        let vec = list.to_vec();
+                        let mut result_items = Vec::new();
+                        for (i, item) in vec.iter().enumerate() {
+                            result_items.push(item.clone());
+                            if i < vec.len() - 1 {
+                                result_items.push(sep.clone());
+                            }
+                        }
+                        let result = Term::list(result_items);
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if result == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:filterNumbers - list list:filterNumbers numbersOnly
+        // Filters list to only include numeric literals
+        self.register(&format!("{}filterNumbers", ns::LIST), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let filtered: Vec<Term> = list.iter()
+                    .filter(|item| get_number(item).is_some())
+                    .cloned()
+                    .collect();
+                let result = Term::list(filtered);
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), result);
+                    return BuiltinResult::Success(new_bindings);
+                } else if result == *object {
+                    return BuiltinResult::Success(bindings.clone());
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:filterStrings - list list:filterStrings stringsOnly
+        // Filters list to only include string literals
+        self.register(&format!("{}filterStrings", ns::LIST), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let filtered: Vec<Term> = list.iter()
+                    .filter(|item| get_string(item).is_some())
+                    .cloned()
+                    .collect();
+                let result = Term::list(filtered);
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), result);
+                    return BuiltinResult::Success(new_bindings);
+                } else if result == *object {
+                    return BuiltinResult::Success(bindings.clone());
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:filterURIs - list list:filterURIs urisOnly
+        // Filters list to only include URIs
+        self.register(&format!("{}filterURIs", ns::LIST), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let filtered: Vec<Term> = list.iter()
+                    .filter(|item| matches!(item, Term::Uri(_)))
+                    .cloned()
+                    .collect();
+                let result = Term::list(filtered);
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), result);
+                    return BuiltinResult::Success(new_bindings);
+                } else if result == *object {
+                    return BuiltinResult::Success(bindings.clone());
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:min - numericList list:min minimum
+        // Returns the minimum number in a list
+        self.register(&format!("{}min", ns::LIST), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let numbers: Vec<f64> = list.iter()
+                    .filter_map(|item| get_number(item))
+                    .collect();
+                if !numbers.is_empty() {
+                    let min = numbers.iter().cloned().fold(f64::INFINITY, f64::min);
+                    return match_or_bind(object, min, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:max - numericList list:max maximum
+        // Returns the maximum number in a list
+        self.register(&format!("{}max", ns::LIST), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let numbers: Vec<f64> = list.iter()
+                    .filter_map(|item| get_number(item))
+                    .collect();
+                if !numbers.is_empty() {
+                    let max = numbers.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    return match_or_bind(object, max, bindings);
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // list:average - numericList list:average avg
+        // Returns the average of numbers in a list
+        self.register(&format!("{}average", ns::LIST), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let numbers: Vec<f64> = list.iter()
+                    .filter_map(|item| get_number(item))
+                    .collect();
+                if !numbers.is_empty() {
+                    let avg = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                    return match_or_bind(object, avg, bindings);
                 }
             }
             BuiltinResult::NotReady

@@ -416,6 +416,7 @@ fn main() -> Result<()> {
             recursive: true,
             filter: cli.filter,
             generate_proof: cli.why,
+            enable_tabling: true,
         };
 
         let mut reasoner = Reasoner::with_config(config);
@@ -1808,6 +1809,7 @@ fn execute_n3ql(store: &Store, query_content: &str, _prefixes: &IndexMap<String,
             recursive: true,
             filter: false,
             generate_proof: false,
+            enable_tabling: true,
         };
 
         let mut reasoner = Reasoner::with_config(config);

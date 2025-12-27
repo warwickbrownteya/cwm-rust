@@ -50,6 +50,6 @@ pub mod sparql;
 pub use term::{Term, Triple, Bindings, Uri, Literal, Datatype, BlankNode, Variable, List, FormulaRef};
 pub use parser::{parse, ParseResult, ParseError, ParserState, Formula, N3Parser};
 pub use store::Store;
-pub use reasoner::{Reasoner, Rule, ReasonerConfig, ReasonerStats, Proof, ProofStep};
+pub use reasoner::{Reasoner, Rule, ReasonerConfig, ReasonerStats, Proof, ProofStep, TablingState};
 pub use builtins::{BuiltinRegistry, BuiltinResult};
 pub use sparql::{execute_sparql, QueryResult, format_results_xml, format_results_json};

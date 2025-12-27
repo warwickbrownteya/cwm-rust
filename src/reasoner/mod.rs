@@ -5,10 +5,43 @@
 //! - Forward chaining over rules
 //! - Built-in predicate evaluation
 //! - Proof generation for inference tracking
+//! - Tabling/memoization for cycle detection and performance
 
 use crate::term::{Term, Triple, Variable, Bindings, substitute_triple};
 use crate::store::Store;
 use crate::builtins::BuiltinRegistry;
+use std::collections::{HashSet, HashMap};
+
+/// A cache key for memoizing pattern matching results
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+struct PatternKey {
+    /// Serialized pattern for hashing
+    pattern_repr: String,
+}
+
+impl PatternKey {
+    fn from_pattern(pattern: &Triple, bindings: &Bindings) -> Self {
+        let substituted = substitute_triple(pattern, bindings);
+        PatternKey {
+            pattern_repr: format!("{:?}", substituted),
+        }
+    }
+}
+
+/// Tabling state for memoization and cycle detection
+#[derive(Clone, Debug, Default)]
+pub struct TablingState {
+    /// Patterns currently being computed (for cycle detection)
+    computing: HashSet<String>,
+    /// Cached pattern match results
+    cache: HashMap<String, Vec<Bindings>>,
+    /// Number of cache hits
+    pub cache_hits: usize,
+    /// Number of cache misses
+    pub cache_misses: usize,
+    /// Number of cycles detected
+    pub cycles_detected: usize,
+}
 
 /// A single step in a proof chain
 #[derive(Clone, Debug)]
@@ -99,6 +132,8 @@ pub struct ReasonerConfig {
     pub filter: bool,
     /// Whether to generate proof traces
     pub generate_proof: bool,
+    /// Whether to enable tabling/memoization for cycle detection
+    pub enable_tabling: bool,
 }
 
 impl Default for ReasonerConfig {
@@ -108,6 +143,7 @@ impl Default for ReasonerConfig {
             recursive: true,
             filter: false,
             generate_proof: false,
+            enable_tabling: true, // Enable by default for safety
         }
     }
 }
@@ -124,6 +160,10 @@ pub struct Reasoner {
     stats: ReasonerStats,
     /// Proof trace (if proof generation is enabled)
     proof: Option<Proof>,
+    /// Tabling state for memoization
+    tabling: TablingState,
+    /// Set of derived triple signatures for duplicate detection
+    derived_signatures: HashSet<String>,
 }
 
 /// Statistics about reasoning
@@ -144,6 +184,8 @@ impl Reasoner {
             rules: Vec::new(),
             stats: ReasonerStats::default(),
             proof: None,
+            tabling: TablingState::default(),
+            derived_signatures: HashSet::new(),
         }
     }
 
@@ -156,6 +198,8 @@ impl Reasoner {
             rules: Vec::new(),
             stats: ReasonerStats::default(),
             proof: if generate_proof { Some(Proof::default()) } else { None },
+            tabling: TablingState::default(),
+            derived_signatures: HashSet::new(),
         }
     }
 
@@ -173,6 +217,17 @@ impl Reasoner {
     /// Take ownership of the proof trace
     pub fn take_proof(&mut self) -> Option<Proof> {
         self.proof.take()
+    }
+
+    /// Get tabling statistics
+    pub fn tabling_stats(&self) -> &TablingState {
+        &self.tabling
+    }
+
+    /// Reset tabling state (useful between runs)
+    pub fn reset_tabling(&mut self) {
+        self.tabling = TablingState::default();
+        self.derived_signatures.clear();
     }
 
     /// Add a rule to the reasoner
@@ -199,6 +254,15 @@ impl Reasoner {
     pub fn run(&mut self, store: &mut Store) -> &ReasonerStats {
         self.stats = ReasonerStats::default();
 
+        // Reset tabling state for fresh run
+        if self.config.enable_tabling {
+            self.reset_tabling();
+            // Pre-populate derived signatures with existing triples
+            for triple in store.iter() {
+                self.derived_signatures.insert(format!("{:?}", triple));
+            }
+        }
+
         // Capture original assertions for proof
         if let Some(ref mut proof) = self.proof {
             proof.assertions = store.iter().cloned().collect();
@@ -224,6 +288,8 @@ impl Reasoner {
     fn step(&mut self, store: &mut Store) -> usize {
         // Collect derivations with proof info: (triple, rule_index, bindings, premises)
         let mut derivations: Vec<(Triple, usize, Bindings, Vec<Triple>)> = Vec::new();
+        // Track signatures of triples being derived in this step
+        let mut step_signatures: HashSet<String> = HashSet::new();
 
         for (rule_idx, rule) in self.rules.iter().enumerate() {
             // Find all matches for the antecedent, tracking premises
@@ -234,13 +300,24 @@ impl Reasoner {
                 for pattern in &rule.consequent {
                     let triple = substitute_triple(pattern, &bindings);
 
-                    // Only add ground triples that aren't already in the store
-                    if triple.is_ground() && !store.contains(&triple) {
-                        // Check we haven't already derived this in this step
-                        if !derivations.iter().any(|(t, _, _, _)| t == &triple) {
-                            derivations.push((triple, rule_idx, bindings.clone(), premises.clone()));
-                            self.stats.rules_fired += 1;
-                        }
+                    // Only process ground triples
+                    if !triple.is_ground() {
+                        continue;
+                    }
+
+                    let sig = format!("{:?}", triple);
+
+                    // Use tabling for fast duplicate detection if enabled
+                    let already_exists = if self.config.enable_tabling {
+                        self.derived_signatures.contains(&sig)
+                    } else {
+                        store.contains(&triple)
+                    };
+
+                    if !already_exists && !step_signatures.contains(&sig) {
+                        step_signatures.insert(sig);
+                        derivations.push((triple, rule_idx, bindings.clone(), premises.clone()));
+                        self.stats.rules_fired += 1;
                     }
                 }
             }
@@ -258,6 +335,11 @@ impl Reasoner {
         };
 
         for (i, (triple, rule_idx, bindings, premises)) in derivations.into_iter().enumerate() {
+            // Update tabling state
+            if self.config.enable_tabling {
+                self.derived_signatures.insert(format!("{:?}", triple));
+            }
+
             store.add(triple.clone());
 
             // Record proof step if proof generation is enabled
