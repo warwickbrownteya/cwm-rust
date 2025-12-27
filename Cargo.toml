@@ -27,6 +27,9 @@ anyhow = "1"
 # Hashing
 fnv = "1"
 
+# Regex for string builtins
+regex = "1"
+
 [dev-dependencies]
 pretty_assertions = "1"
 
