@@ -44,6 +44,9 @@ hex = "0.4"
 # HTTP for web fetching
 ureq = { version = "2", features = ["json"] }
 
+# HTTP server for SPARQL endpoint
+tiny_http = "0.12"
+
 [dev-dependencies]
 pretty_assertions = "1"
 

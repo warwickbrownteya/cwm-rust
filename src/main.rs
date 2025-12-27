@@ -11,7 +11,124 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indexmap::IndexMap;
 
-use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json};
+use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule};
+
+/// N3 output formatting options
+#[derive(Default, Clone)]
+struct N3Options {
+    /// Use anonymous blank node syntax (_: convention)
+    anon_bnodes: bool,
+    /// Don't use default namespace
+    no_default_ns: bool,
+    /// Escape unicode using \u notation
+    escape_unicode: bool,
+    /// Use identifiers from store
+    use_store_ids: bool,
+    /// Don't use list syntax (..)
+    no_list_syntax: bool,
+    /// No numeric syntax - use strings with ^^
+    no_numeric: bool,
+    /// No prefix - always use URIs in <>
+    no_prefix: bool,
+    /// No relative URIs
+    no_relative: bool,
+    /// Explicit subject for every statement (no ; shorthand)
+    explicit_subject: bool,
+    /// No special syntax (= and ())
+    no_special: bool,
+}
+
+impl N3Options {
+    fn from_flags(flags: &str) -> Self {
+        let mut opts = N3Options::default();
+        for c in flags.chars() {
+            match c {
+                'a' => opts.anon_bnodes = true,
+                'd' => opts.no_default_ns = true,
+                'e' => opts.escape_unicode = true,
+                'i' => opts.use_store_ids = true,
+                'l' => opts.no_list_syntax = true,
+                'n' => opts.no_numeric = true,
+                'p' => opts.no_prefix = true,
+                'r' => opts.no_relative = true,
+                's' => opts.explicit_subject = true,
+                't' => opts.no_special = true,
+                _ => {}
+            }
+        }
+        opts
+    }
+}
+
+/// RDF/XML output formatting options
+#[derive(Default, Clone)]
+struct RdfXmlOptions {
+    /// Don't use nodeIDs for blank nodes
+    no_node_ids: bool,
+    /// Don't use elements as class names
+    no_class_elements: bool,
+    /// No default namespace
+    no_default_ns: bool,
+    /// Don't use RDF collection syntax
+    no_collection: bool,
+    /// No relative URIs
+    no_relative: bool,
+    /// Allow relative URIs for namespaces
+    allow_relative_ns: bool,
+    // Input flags
+    /// Strict spec - unknown parse type as Literal
+    strict: bool,
+    /// Transparent foreign XML
+    transparent_xml: bool,
+    /// Local namespace for non-prefixed attrs
+    local_attrs: bool,
+    /// Default namespace as local
+    default_local: bool,
+    /// Don't require outer rdf:RDF
+    no_rdf_root: bool,
+}
+
+impl RdfXmlOptions {
+    fn from_flags(flags: &str) -> Self {
+        let mut opts = RdfXmlOptions::default();
+        for c in flags.chars() {
+            match c {
+                'b' => opts.no_node_ids = true,
+                'c' => opts.no_class_elements = true,
+                'd' => opts.no_default_ns = true,
+                'l' => opts.no_collection = true,
+                'r' => opts.no_relative = true,
+                'z' => opts.allow_relative_ns = true,
+                'S' => opts.strict = true,
+                'T' => opts.transparent_xml = true,
+                'L' => opts.local_attrs = true,
+                'D' => opts.default_local = true,
+                'R' => opts.no_rdf_root = true,
+                _ => {}
+            }
+        }
+        opts
+    }
+}
+
+/// A proof step explaining how a triple was derived
+#[derive(Clone, Debug)]
+struct ProofStep {
+    /// The derived triple
+    triple: Triple,
+    /// The rule that produced it (if any)
+    rule: Option<usize>,
+    /// The bindings used
+    bindings: Vec<(String, Term)>,
+    /// The antecedent triples that matched
+    antecedents: Vec<Triple>,
+}
+
+/// Proof trace for --why option
+#[derive(Default)]
+struct ProofTrace {
+    steps: Vec<ProofStep>,
+}
 
 #[derive(Parser)]
 #[command(name = "cwm")]
@@ -142,6 +259,43 @@ struct Cli {
     /// Output format for SPARQL results: xml, json
     #[arg(long = "sparql-results", value_name = "FORMAT", default_value = "xml")]
     sparql_results: String,
+
+    /// N3 output flags: a=anon bnodes, d=no default ns, e=escape unicode,
+    /// i=use store ids, l=no list syntax, n=no numeric, p=no prefix,
+    /// r=no relative URIs, s=explicit subject, t=no special syntax
+    #[arg(long = "n3", value_name = "FLAGS")]
+    n3_flags: Option<String>,
+
+    /// RDF/XML output flags: b=no nodeIDs, c=no class elements, d=no default ns,
+    /// l=no collection, r=no relative URIs, z=allow relative ns
+    /// RDF/XML input flags: S=strict, T=transparent XML, L=local attrs, D=default local, R=no rdf:RDF required
+    #[arg(long = "rdf", value_name = "FLAGS")]
+    rdf_flags: Option<String>,
+
+    /// Generate proof/explanation for inferences
+    #[arg(long)]
+    why: bool,
+
+    /// Closure flags for automatic imports: s=subject, p=predicate, o=object,
+    /// t=type, i=imports, r=rules, E=errors, n=no
+    #[arg(long = "closure", value_name = "FLAGS")]
+    closure: Option<String>,
+
+    /// Apply graph patch file (insertions and deletions)
+    #[arg(long = "patch", value_name = "FILE")]
+    patch: Option<PathBuf>,
+
+    /// Language for input/output (n3, rdf, ntriples)
+    #[arg(long = "language", value_name = "LANG")]
+    language: Option<String>,
+
+    /// Start SPARQL HTTP endpoint on specified port (default: 8000)
+    #[arg(long = "sparqlServer", value_name = "PORT")]
+    sparql_server: Option<u16>,
+
+    /// Execute N3QL query from file (N3 pattern matching)
+    #[arg(long = "query", value_name = "FILE")]
+    n3ql_query: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -224,6 +378,18 @@ fn main() -> Result<()> {
         store.add_all(apply_result.triples);
     }
 
+    // Apply patch file if specified (insertions and deletions)
+    if let Some(patch_path) = &cli.patch {
+        let patch_content = fs::read_to_string(patch_path)
+            .with_context(|| format!("Failed to read patch file: {}", patch_path.display()))?;
+        apply_patch(&mut store, &patch_content, &mut all_prefixes)?;
+    }
+
+    // Handle closure flags for automatic imports
+    if let Some(closure_flags) = &cli.closure {
+        load_closure(&mut store, &mut all_prefixes, &mut all_rules, closure_flags, cli.verbose && !cli.quiet)?;
+    }
+
     // Track original triples for --filter mode
     let original_triples: std::collections::HashSet<Triple> = if cli.filter {
         store.iter().cloned().collect()
@@ -239,6 +405,7 @@ fn main() -> Result<()> {
     }
 
     // Run reasoning if requested
+    let mut proof_trace = ProofTrace::default();
     if should_think {
         let max_steps = if cli.max_steps == 0 { usize::MAX } else { cli.max_steps };
         let config = ReasonerConfig {
@@ -250,17 +417,27 @@ fn main() -> Result<()> {
         let mut reasoner = Reasoner::with_config(config);
 
         // Add all rules
-        for rule in all_rules {
-            reasoner.add_rule(rule);
+        for rule in &all_rules {
+            reasoner.add_rule(rule.clone());
         }
 
-        let stats = reasoner.run(&mut store);
-
-        if !cli.quiet && cli.verbose {
-            eprintln!(
-                "Reasoning: {} steps, {} rules fired, {} triples derived",
-                stats.steps, stats.rules_fired, stats.triples_derived
-            );
+        // If --why is set, we track derivations
+        if cli.why {
+            let stats = run_with_proof_tracking(&mut reasoner, &mut store, &all_rules, &mut proof_trace);
+            if !cli.quiet && cli.verbose {
+                eprintln!(
+                    "Reasoning: {} steps, {} rules fired, {} triples derived",
+                    stats.steps, stats.rules_fired, stats.triples_derived
+                );
+            }
+        } else {
+            let stats = reasoner.run(&mut store);
+            if !cli.quiet && cli.verbose {
+                eprintln!(
+                    "Reasoning: {} steps, {} rules fired, {} triples derived",
+                    stats.steps, stats.rules_fired, stats.triples_derived
+                );
+            }
         }
     } else if cli.filter {
         // --filter without --think: warn user
@@ -406,10 +583,51 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Execute N3QL query if specified
+    if let Some(query_path) = &cli.n3ql_query {
+        let query_content = fs::read_to_string(query_path)
+            .with_context(|| format!("Failed to read N3QL query file: {}", query_path.display()))?;
+
+        let result = execute_n3ql(&output_store, &query_content, &all_prefixes)?;
+        let result_output = format_n3(&result, &all_prefixes);
+
+        if let Some(output_path) = &cli.output {
+            fs::write(output_path, &result_output)
+                .with_context(|| format!("Failed to write N3QL result to: {}", output_path.display()))?;
+        } else {
+            io::stdout().write_all(result_output.as_bytes())
+                .context("Failed to write N3QL result to stdout")?;
+        }
+
+        return Ok(());
+    }
+
+    // Start SPARQL server if requested
+    if let Some(port) = cli.sparql_server {
+        let port = if port == 0 { 8000 } else { port };
+        return run_sparql_server(&output_store, &all_prefixes, port);
+    }
+
     // Suppress output if --no flag is set
     if cli.no {
         return Ok(());
     }
+
+    // Output proof trace if --why was specified
+    if cli.why && !proof_trace.steps.is_empty() {
+        let proof_output = format_proof(&proof_trace, &all_prefixes);
+        if let Some(output_path) = &cli.output {
+            fs::write(output_path, &proof_output)
+                .with_context(|| format!("Failed to write proof to: {}", output_path.display()))?;
+        } else {
+            io::stdout().write_all(proof_output.as_bytes())
+                .context("Failed to write proof to stdout")?;
+        }
+        return Ok(());
+    }
+
+    // Parse N3 options if specified
+    let n3_opts = cli.n3_flags.as_ref().map(|f| N3Options::from_flags(f));
 
     // Generate output
     let output_content = if cli.strings {
@@ -426,7 +644,13 @@ fn main() -> Result<()> {
         format_ntriples(&output_store)
     } else {
         match cli.format {
-            OutputFormat::N3 => format_n3(&output_store, &all_prefixes),
+            OutputFormat::N3 => {
+                if let Some(opts) = &n3_opts {
+                    format_n3_with_options(&output_store, &all_prefixes, opts)
+                } else {
+                    format_n3(&output_store, &all_prefixes)
+                }
+            }
             OutputFormat::Ntriples => format_ntriples(&output_store),
             OutputFormat::Rdf => format_rdfxml(&output_store, &all_prefixes),
             OutputFormat::Jsonld => format_jsonld(&output_store, &all_prefixes),
@@ -1042,4 +1266,531 @@ fn escape_json(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Apply a patch file to the store
+/// Patch format: lines starting with + are insertions, - are deletions
+fn apply_patch(store: &mut Store, patch_content: &str, prefixes: &mut IndexMap<String, String>) -> Result<()> {
+    let mut insertions = Vec::new();
+    let mut deletions = Vec::new();
+
+    // First, parse the patch file as N3 to get any prefix declarations
+    let patch_result = parse(patch_content)
+        .map_err(|e| anyhow::anyhow!("Patch parse error: {}", e))?;
+    prefixes.extend(patch_result.prefixes);
+
+    // Process each line
+    for line in patch_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("@prefix") || trimmed.starts_with("@base") {
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix('+') {
+            // Parse and add as insertion
+            let triple_str = rest.trim();
+            if !triple_str.is_empty() {
+                if let Ok(result) = parse(&format!("{} .", triple_str)) {
+                    insertions.extend(result.triples);
+                }
+            }
+        } else if let Some(rest) = trimmed.strip_prefix('-') {
+            // Parse and add as deletion
+            let triple_str = rest.trim();
+            if !triple_str.is_empty() {
+                if let Ok(result) = parse(&format!("{} .", triple_str)) {
+                    deletions.extend(result.triples);
+                }
+            }
+        }
+    }
+
+    // Apply deletions
+    for triple in &deletions {
+        store.remove(triple);
+    }
+
+    // Apply insertions
+    for triple in insertions {
+        store.add(triple);
+    }
+
+    Ok(())
+}
+
+/// Load closure (imports) based on flags
+fn load_closure(
+    store: &mut Store,
+    prefixes: &mut IndexMap<String, String>,
+    rules: &mut Vec<Rule>,
+    flags: &str,
+    verbose: bool
+) -> Result<()> {
+    let load_imports = flags.contains('i');
+    let load_rules = flags.contains('r');
+
+    if !load_imports && !load_rules {
+        return Ok(());
+    }
+
+    // Find owl:imports statements
+    let owl_imports = "http://www.w3.org/2002/07/owl#imports";
+    let mut import_uris: Vec<String> = Vec::new();
+
+    for triple in store.iter() {
+        if let Term::Uri(pred) = &triple.predicate {
+            if pred.as_str() == owl_imports {
+                if let Term::Uri(obj) = &triple.object {
+                    import_uris.push(obj.as_str().to_string());
+                }
+            }
+        }
+    }
+
+    // Load each imported document
+    for uri in import_uris {
+        if verbose {
+            eprintln!("Loading import: {}", uri);
+        }
+
+        // Try to fetch the document
+        match fetch_document(&uri) {
+            Ok(content) => {
+                if let Ok(result) = parse(&content) {
+                    store.add_all(result.triples);
+                    prefixes.extend(result.prefixes);
+                    if load_rules {
+                        rules.extend(result.rules);
+                    }
+                }
+            }
+            Err(e) => {
+                if !flags.contains('E') {
+                    // Ignore errors unless E flag is set
+                    eprintln!("Warning: Failed to load {}: {}", uri, e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch a document from a URI (file or HTTP)
+fn fetch_document(uri: &str) -> Result<String> {
+    if uri.starts_with("file://") {
+        let path = &uri[7..];
+        fs::read_to_string(path).context("Failed to read local file")
+    } else if uri.starts_with("http://") || uri.starts_with("https://") {
+        let response = ureq::get(uri)
+            .call()
+            .map_err(|e| anyhow::anyhow!("HTTP error: {}", e))?;
+        response.into_string().context("Failed to read HTTP response")
+    } else {
+        // Try as local file path
+        fs::read_to_string(uri).context("Failed to read file")
+    }
+}
+
+/// Run reasoning with proof tracking
+fn run_with_proof_tracking(
+    reasoner: &mut Reasoner,
+    store: &mut Store,
+    rules: &[Rule],
+    proof: &mut ProofTrace,
+) -> cwm::ReasonerStats {
+    // Track which triples existed before reasoning
+    let original: std::collections::HashSet<Triple> = store.iter().cloned().collect();
+
+    // Run the reasoner
+    let stats = reasoner.run(store);
+
+    // Find new triples and create proof steps
+    for triple in store.iter() {
+        if !original.contains(triple) {
+            // This triple was derived - try to find which rule produced it
+            let step = ProofStep {
+                triple: triple.clone(),
+                rule: None, // We'd need to track this during reasoning for accurate info
+                bindings: Vec::new(),
+                antecedents: Vec::new(),
+            };
+            proof.steps.push(step);
+        }
+    }
+
+    stats.clone()
+}
+
+/// Format proof trace as N3 with annotations
+fn format_proof(proof: &ProofTrace, prefixes: &IndexMap<String, String>) -> String {
+    let mut output = String::new();
+    let formatter = N3Formatter::new(prefixes);
+
+    // Add prefix declarations
+    output.push_str("# Proof trace\n");
+    output.push_str("@prefix log: <http://www.w3.org/2000/10/swap/log#> .\n");
+    output.push_str("@prefix r: <http://www.w3.org/2000/10/swap/reason#> .\n\n");
+
+    for (i, step) in proof.steps.iter().enumerate() {
+        output.push_str(&format!("# Step {}\n", i + 1));
+        output.push_str(&format!(
+            "{} {} {} .\n",
+            formatter.format_term(&step.triple.subject),
+            formatter.format_term(&step.triple.predicate),
+            formatter.format_term(&step.triple.object)
+        ));
+
+        if let Some(rule_idx) = step.rule {
+            output.push_str(&format!("    # Derived by rule {}\n", rule_idx));
+        }
+
+        if !step.antecedents.is_empty() {
+            output.push_str("    # From:\n");
+            for ant in &step.antecedents {
+                output.push_str(&format!(
+                    "    #   {} {} {}\n",
+                    formatter.format_term(&ant.subject),
+                    formatter.format_term(&ant.predicate),
+                    formatter.format_term(&ant.object)
+                ));
+            }
+        }
+        output.push('\n');
+    }
+
+    output
+}
+
+/// Compute the difference between two graphs
+pub fn graph_diff(before: &Store, after: &Store) -> (Vec<Triple>, Vec<Triple>) {
+    let before_set: std::collections::HashSet<&Triple> = before.iter().collect();
+    let after_set: std::collections::HashSet<&Triple> = after.iter().collect();
+
+    // Additions: in after but not in before
+    let additions: Vec<Triple> = after_set
+        .difference(&before_set)
+        .map(|t| (*t).clone())
+        .collect();
+
+    // Deletions: in before but not in after
+    let deletions: Vec<Triple> = before_set
+        .difference(&after_set)
+        .map(|t| (*t).clone())
+        .collect();
+
+    (additions, deletions)
+}
+
+/// Format N3 with custom options
+fn format_n3_with_options(store: &Store, prefixes: &IndexMap<String, String>, opts: &N3Options) -> String {
+    let mut output = String::new();
+
+    // Only output prefixes if not suppressed
+    if !opts.no_prefix {
+        for (short, long) in prefixes {
+            if opts.no_default_ns && short.is_empty() {
+                continue;
+            }
+            output.push_str(&format!("@prefix {}: <{}> .\n", short, long));
+        }
+        if !prefixes.is_empty() {
+            output.push('\n');
+        }
+    }
+
+    // Group by subject unless explicit subject mode
+    if opts.explicit_subject {
+        // Output each triple on its own line
+        for triple in store.iter() {
+            let subj = format_term_with_options(&triple.subject, prefixes, opts);
+            let pred = format_term_with_options(&triple.predicate, prefixes, opts);
+            let obj = format_term_with_options(&triple.object, prefixes, opts);
+            output.push_str(&format!("{} {} {} .\n", subj, pred, obj));
+        }
+    } else {
+        // Group by subject (standard pretty printing)
+        let formatter = N3Formatter::new(prefixes);
+        let mut by_subject: IndexMap<String, Vec<&Triple>> = IndexMap::new();
+
+        for triple in store.iter() {
+            let key = formatter.format_term(&triple.subject);
+            by_subject.entry(key).or_default().push(triple);
+        }
+
+        for (subject, triples) in by_subject {
+            if triples.len() == 1 {
+                let t = triples[0];
+                output.push_str(&format!(
+                    "{} {} {} .\n",
+                    subject,
+                    format_term_with_options(&t.predicate, prefixes, opts),
+                    format_term_with_options(&t.object, prefixes, opts)
+                ));
+            } else {
+                output.push_str(&format!("{}\n", subject));
+                for (i, t) in triples.iter().enumerate() {
+                    let sep = if i < triples.len() - 1 { " ;" } else { " ." };
+                    output.push_str(&format!(
+                        "    {} {}{}\n",
+                        format_term_with_options(&t.predicate, prefixes, opts),
+                        format_term_with_options(&t.object, prefixes, opts),
+                        sep
+                    ));
+                }
+            }
+        }
+    }
+
+    output
+}
+
+/// Format a term with N3 options
+fn format_term_with_options(term: &Term, prefixes: &IndexMap<String, String>, opts: &N3Options) -> String {
+    match term {
+        Term::Uri(u) => {
+            if opts.no_prefix {
+                format!("<{}>", u.as_str())
+            } else {
+                // Try to use prefix
+                let formatter = N3Formatter::new(prefixes);
+                formatter.compact_uri(u.as_str())
+            }
+        }
+        Term::Literal(lit) => {
+            if opts.no_numeric {
+                // Force string syntax for numbers
+                format!("\"{}\"", lit.value())
+            } else {
+                let formatter = N3Formatter::new(prefixes);
+                formatter.format_literal(lit)
+            }
+        }
+        Term::BlankNode(b) => {
+            if opts.anon_bnodes {
+                format!("_:{}", b.id())
+            } else {
+                format!("{}", b)
+            }
+        }
+        Term::List(l) => {
+            if opts.no_list_syntax {
+                // Would need to convert to rdf:first/rdf:rest - for now just use standard
+                let formatter = N3Formatter::new(prefixes);
+                formatter.format_list(l)
+            } else {
+                let formatter = N3Formatter::new(prefixes);
+                formatter.format_list(l)
+            }
+        }
+        _ => {
+            let formatter = N3Formatter::new(prefixes);
+            formatter.format_term(term)
+        }
+    }
+}
+
+/// Run a SPARQL HTTP endpoint server
+fn run_sparql_server(store: &Store, prefixes: &IndexMap<String, String>, port: u16) -> Result<()> {
+    use tiny_http::{Server, Response, Header};
+
+    let addr = format!("0.0.0.0:{}", port);
+    let server = Server::http(&addr)
+        .map_err(|e| anyhow::anyhow!("Failed to start server: {}", e))?;
+
+    eprintln!("SPARQL server listening on http://localhost:{}/sparql", port);
+    eprintln!("Press Ctrl+C to stop");
+
+    // Clone data for the server loop
+    let store_copy = store.clone();
+
+    for mut request in server.incoming_requests() {
+        let url = request.url().to_string();
+        let method = request.method().to_string();
+
+        // Handle SPARQL endpoint
+        if url.starts_with("/sparql") {
+            let query = if method == "GET" {
+                // Parse query from URL parameters
+                if let Some(pos) = url.find("?query=") {
+                    let query_part = &url[pos + 7..];
+                    // URL decode the query
+                    percent_decode_str(query_part)
+                        .decode_utf8()
+                        .map(|s| s.into_owned())
+                        .ok()
+                } else {
+                    None
+                }
+            } else if method == "POST" {
+                // Read query from body
+                let mut content = String::new();
+                {
+                    use std::io::Read;
+                    let mut reader = request.as_reader();
+                    let _ = reader.take(1024 * 1024).read_to_string(&mut content);
+                }
+
+                // Check content type
+                let content_type: String = request.headers()
+                    .iter()
+                    .find(|h| h.field.to_string().to_lowercase() == "content-type")
+                    .map(|h| h.value.to_string())
+                    .unwrap_or_default();
+
+                if content_type.contains("application/sparql-query") {
+                    Some(content)
+                } else if content_type.contains("application/x-www-form-urlencoded") {
+                    // Parse form data
+                    if let Some(pos) = content.find("query=") {
+                        let query_part = &content[pos + 6..];
+                        let end = query_part.find('&').unwrap_or(query_part.len());
+                        percent_decode_str(&query_part[..end])
+                            .decode_utf8()
+                            .map(|s| s.into_owned())
+                            .ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(content)
+                }
+            } else {
+                None
+            };
+
+            if let Some(query_str) = query {
+                match execute_sparql(&store_copy, &query_str) {
+                    Ok(result) => {
+                        // Check Accept header for format
+                        let accept: String = request.headers()
+                            .iter()
+                            .find(|h| h.field.to_string().to_lowercase() == "accept")
+                            .map(|h| h.value.to_string())
+                            .unwrap_or_else(|| "application/sparql-results+xml".to_string());
+
+                        let (content_type, body) = if accept.contains("json") {
+                            ("application/sparql-results+json", format_results_json(&result))
+                        } else {
+                            ("application/sparql-results+xml", format_results_xml(&result))
+                        };
+
+                        let response = Response::from_string(body)
+                            .with_header(Header::from_bytes(
+                                &b"Content-Type"[..],
+                                content_type.as_bytes()
+                            ).unwrap())
+                            .with_header(Header::from_bytes(
+                                &b"Access-Control-Allow-Origin"[..],
+                                &b"*"[..]
+                            ).unwrap());
+
+                        let _ = request.respond(response);
+                    }
+                    Err(e) => {
+                        let response = Response::from_string(format!("SPARQL Error: {}", e))
+                            .with_status_code(400);
+                        let _ = request.respond(response);
+                    }
+                }
+            } else {
+                let response = Response::from_string("Missing query parameter")
+                    .with_status_code(400);
+                let _ = request.respond(response);
+            }
+        } else if url == "/" || url == "/index.html" {
+            // Serve a simple HTML form for testing
+            let html = r#"<!DOCTYPE html>
+<html>
+<head><title>CWM SPARQL Endpoint</title></head>
+<body>
+<h1>CWM SPARQL Endpoint</h1>
+<form action="/sparql" method="POST">
+<textarea name="query" rows="10" cols="60">
+SELECT ?s ?p ?o
+WHERE { ?s ?p ?o }
+LIMIT 10
+</textarea>
+<br>
+<button type="submit">Execute Query</button>
+</form>
+</body>
+</html>"#;
+            let response = Response::from_string(html)
+                .with_header(Header::from_bytes(
+                    &b"Content-Type"[..],
+                    &b"text/html"[..]
+                ).unwrap());
+            let _ = request.respond(response);
+        } else {
+            let response = Response::from_string("Not Found")
+                .with_status_code(404);
+            let _ = request.respond(response);
+        }
+    }
+
+    Ok(())
+}
+
+use percent_encoding::percent_decode_str;
+
+/// Execute N3QL query (N3 pattern matching)
+///
+/// N3QL queries are N3 files with rules that produce output.
+/// The query is applied to the data, and matching patterns generate output triples.
+///
+/// Example query:
+/// ```n3
+/// @prefix : <http://example.org/> .
+/// { ?s :name ?name } => { ?s :hasName ?name } .
+/// ```
+fn execute_n3ql(store: &Store, query_content: &str, prefixes: &IndexMap<String, String>) -> Result<Store> {
+    // Parse the query as N3
+    let query_result = parse(query_content)
+        .map_err(|e| anyhow::anyhow!("N3QL parse error: {}", e))?;
+
+    // Create a copy of the store for reasoning
+    let mut working_store = store.clone();
+
+    // Add any triples from the query file
+    for triple in query_result.triples {
+        working_store.add(triple);
+    }
+
+    // If there are rules in the query, apply them
+    let has_rules = !query_result.rules.is_empty();
+    if has_rules {
+        let config = ReasonerConfig {
+            max_steps: 10000,
+            recursive: true,
+            filter: false,
+        };
+
+        let mut reasoner = Reasoner::with_config(config);
+        for rule in query_result.rules {
+            reasoner.add_rule(rule);
+        }
+        reasoner.run(&mut working_store);
+    }
+
+    // Find result triples - look for triples with special predicates
+    // or just return all new triples derived
+    let original: std::collections::HashSet<&Triple> = store.iter().collect();
+
+    let mut result = Store::new();
+    for triple in working_store.iter() {
+        if !original.contains(triple) {
+            result.add(triple.clone());
+        }
+    }
+
+    // If no new triples, return matching triples based on query patterns
+    if result.is_empty() && has_rules {
+        // Just return all triples from the store as the result
+        for triple in store.iter() {
+            result.add(triple.clone());
+        }
+    }
+
+    Ok(result)
 }
