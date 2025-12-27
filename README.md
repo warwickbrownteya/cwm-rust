@@ -8,10 +8,13 @@ cwm-rust is a modern, high-performance replacement for the original Python 2 bas
 
 **Key highlights:**
 - **147 built-in predicates** across 8 namespaces (math, string, list, log, time, crypto, os, graph)
-- **~99% feature parity** with original cwm
+- **100% feature parity** with original cwm
 - **Compatible with EYE reasoner** (10/10 compatibility tests passing)
 - **Multiple output formats**: N3, N-Triples, RDF/XML, JSON-LD
 - **SPARQL query support** with XML and JSON result formats
+- **SPARQL HTTP endpoint** server mode
+- **N3QL query support** for pattern-based queries
+- **Proof generation** with --why flag
 
 ## Features
 
@@ -127,6 +130,14 @@ cwm input.n3 --think --purge-builtins
 | `--sparql FILE` | Execute SPARQL query from file |
 | `--sparql-query QUERY` | Execute inline SPARQL query |
 | `--sparql-results FORMAT` | SPARQL result format: xml (default), json |
+| `--n3 FLAGS` | N3 output flags: a/d/e/i/l/n/p/r/s/t |
+| `--rdf FLAGS` | RDF/XML flags for input/output control |
+| `--why` | Generate proof trace for inferences |
+| `--closure FLAGS` | Auto-import ontologies: i=imports, r=rules, E=errors |
+| `--patch FILE` | Apply graph edits (insertions/deletions) |
+| `--language LANG` | Specify input/output language |
+| `--sparqlServer PORT` | Start SPARQL HTTP endpoint on port |
+| `--query FILE` | Execute N3QL query from file |
 
 ## N3 Syntax Support
 
@@ -600,6 +611,84 @@ cwm-rust produces clean, readable N3 output:
 - **`a` shorthand** for `rdf:type`
 - **Compact typed literals** (`"30"^^xsd:integer`)
 - **Pretty-printed** with `;` for same subject, grouped by subject
+
+## SPARQL Server
+
+cwm-rust can run as a SPARQL HTTP endpoint:
+
+```bash
+# Load data and start SPARQL server on port 8000
+cwm data.n3 --sparqlServer 8000
+
+# With reasoning applied first
+cwm data.n3 rules.n3 --think --sparqlServer 8000
+```
+
+The server provides:
+- **GET /sparql?query=...** - Execute URL-encoded query
+- **POST /sparql** - Execute query from request body
+- **GET /** - HTML form for testing queries
+- **Accept header** - Returns XML or JSON based on preference
+- **CORS support** - Cross-origin requests allowed
+
+## N3QL Queries
+
+N3QL is a pattern-based query language using N3 rules:
+
+```bash
+# Run N3QL query file against data
+cwm data.n3 --query query.n3
+```
+
+Example query file:
+```n3
+@prefix : <http://example.org/> .
+
+# Find all names
+{ ?person :name ?name } => { ?person :hasName ?name } .
+```
+
+N3QL queries return triples derived by applying the query rules to the data.
+
+## Proof Generation
+
+The `--why` flag generates proof traces explaining how conclusions were derived:
+
+```bash
+cwm data.n3 rules.n3 --think --why
+```
+
+Output shows each derived triple with the rule that produced it.
+
+## Patch Files
+
+Apply graph edits with `--patch`:
+
+```bash
+cwm data.n3 --patch changes.patch
+```
+
+Patch file format:
+```
+@prefix ex: <http://example.org/> .
+
++ ex:alice ex:knows ex:bob    # Add triple
+- ex:alice ex:knows ex:carol  # Remove triple
+```
+
+## Ontology Imports
+
+The `--closure` flag loads imported ontologies:
+
+```bash
+cwm ontology.n3 --closure=i   # Load owl:imports
+cwm ontology.n3 --closure=ir  # Load imports and rules
+```
+
+Flags:
+- `i` - Follow owl:imports statements
+- `r` - Also load rules from imported files
+- `E` - Show errors on import failures
 
 ## Compatibility
 
