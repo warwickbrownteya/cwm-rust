@@ -4,10 +4,41 @@
 //! - Pattern matching with unification
 //! - Forward chaining over rules
 //! - Built-in predicate evaluation
+//! - Proof generation for inference tracking
 
 use crate::term::{Term, Triple, Variable, Bindings, substitute_triple};
 use crate::store::Store;
 use crate::builtins::BuiltinRegistry;
+
+/// A single step in a proof chain
+#[derive(Clone, Debug)]
+pub struct ProofStep {
+    /// The derived triple
+    pub conclusion: Triple,
+    /// Index of the rule that produced this conclusion
+    pub rule_index: usize,
+    /// The rule name (if any)
+    pub rule_name: Option<String>,
+    /// The antecedent patterns from the rule
+    pub rule_antecedent: Vec<Triple>,
+    /// The consequent patterns from the rule
+    pub rule_consequent: Vec<Triple>,
+    /// The variable bindings used
+    pub bindings: Vec<(String, Term)>,
+    /// The ground triples that matched the antecedent
+    pub premises: Vec<Triple>,
+    /// Step number in the inference sequence
+    pub step_number: usize,
+}
+
+/// A complete proof trace for an inference session
+#[derive(Clone, Debug, Default)]
+pub struct Proof {
+    /// All inference steps in order
+    pub steps: Vec<ProofStep>,
+    /// The original (asserted) triples
+    pub assertions: Vec<Triple>,
+}
 
 /// A rule in N3 (antecedent => consequent)
 #[derive(Clone, Debug)]
@@ -66,6 +97,8 @@ pub struct ReasonerConfig {
     pub recursive: bool,
     /// Whether to filter derivations (think mode)
     pub filter: bool,
+    /// Whether to generate proof traces
+    pub generate_proof: bool,
 }
 
 impl Default for ReasonerConfig {
@@ -74,6 +107,7 @@ impl Default for ReasonerConfig {
             max_steps: 10000,
             recursive: true,
             filter: false,
+            generate_proof: false,
         }
     }
 }
@@ -88,6 +122,8 @@ pub struct Reasoner {
     rules: Vec<Rule>,
     /// Statistics
     stats: ReasonerStats,
+    /// Proof trace (if proof generation is enabled)
+    proof: Option<Proof>,
 }
 
 /// Statistics about reasoning
@@ -107,17 +143,36 @@ impl Reasoner {
             builtins: BuiltinRegistry::new(),
             rules: Vec::new(),
             stats: ReasonerStats::default(),
+            proof: None,
         }
     }
 
     /// Create a reasoner with custom configuration
     pub fn with_config(config: ReasonerConfig) -> Self {
+        let generate_proof = config.generate_proof;
         Reasoner {
             config,
             builtins: BuiltinRegistry::new(),
             rules: Vec::new(),
             stats: ReasonerStats::default(),
+            proof: if generate_proof { Some(Proof::default()) } else { None },
         }
+    }
+
+    /// Enable proof generation
+    pub fn enable_proof(&mut self) {
+        self.config.generate_proof = true;
+        self.proof = Some(Proof::default());
+    }
+
+    /// Get the proof trace (if proof generation was enabled)
+    pub fn proof(&self) -> Option<&Proof> {
+        self.proof.as_ref()
+    }
+
+    /// Take ownership of the proof trace
+    pub fn take_proof(&mut self) -> Option<Proof> {
+        self.proof.take()
     }
 
     /// Add a rule to the reasoner
@@ -144,6 +199,11 @@ impl Reasoner {
     pub fn run(&mut self, store: &mut Store) -> &ReasonerStats {
         self.stats = ReasonerStats::default();
 
+        // Capture original assertions for proof
+        if let Some(ref mut proof) = self.proof {
+            proof.assertions = store.iter().cloned().collect();
+        }
+
         loop {
             if self.stats.steps >= self.config.max_steps {
                 break;
@@ -162,40 +222,70 @@ impl Reasoner {
 
     /// Execute a single inference step
     fn step(&mut self, store: &mut Store) -> usize {
-        let mut new_triples = Vec::new();
+        // Collect derivations with proof info: (triple, rule_index, bindings, premises)
+        let mut derivations: Vec<(Triple, usize, Bindings, Vec<Triple>)> = Vec::new();
 
-        for rule in &self.rules {
-            // Find all matches for the antecedent
-            let bindings_list = self.match_antecedent(store, &rule.antecedent);
+        for (rule_idx, rule) in self.rules.iter().enumerate() {
+            // Find all matches for the antecedent, tracking premises
+            let matches = self.match_antecedent_with_premises(store, &rule.antecedent);
 
-            for bindings in bindings_list {
+            for (bindings, premises) in matches {
                 // Generate consequent triples
                 for pattern in &rule.consequent {
                     let triple = substitute_triple(pattern, &bindings);
 
                     // Only add ground triples that aren't already in the store
                     if triple.is_ground() && !store.contains(&triple) {
-                        new_triples.push(triple);
-                        self.stats.rules_fired += 1;
+                        // Check we haven't already derived this in this step
+                        if !derivations.iter().any(|(t, _, _, _)| t == &triple) {
+                            derivations.push((triple, rule_idx, bindings.clone(), premises.clone()));
+                            self.stats.rules_fired += 1;
+                        }
                     }
                 }
             }
         }
 
-        let count = new_triples.len();
+        let count = derivations.len();
         self.stats.triples_derived += count;
 
-        for triple in new_triples {
-            store.add(triple);
+        // Add triples to store and record proof steps
+        let proof_enabled = self.proof.is_some();
+        let step_base = if let Some(ref proof) = self.proof {
+            proof.steps.len()
+        } else {
+            0
+        };
+
+        for (i, (triple, rule_idx, bindings, premises)) in derivations.into_iter().enumerate() {
+            store.add(triple.clone());
+
+            // Record proof step if proof generation is enabled
+            if proof_enabled {
+                let rule = &self.rules[rule_idx];
+                let proof_step = ProofStep {
+                    conclusion: triple,
+                    rule_index: rule_idx,
+                    rule_name: rule.name.clone(),
+                    rule_antecedent: rule.antecedent.clone(),
+                    rule_consequent: rule.consequent.clone(),
+                    bindings: bindings.iter().map(|(v, t)| (v.name().to_string(), t.clone())).collect(),
+                    premises,
+                    step_number: step_base + i + 1,
+                };
+                if let Some(ref mut proof) = self.proof {
+                    proof.steps.push(proof_step);
+                }
+            }
         }
 
         count
     }
 
-    /// Match all antecedent patterns against the store
-    fn match_antecedent(&self, store: &Store, patterns: &[Triple]) -> Vec<Bindings> {
+    /// Match antecedent patterns and track which triples matched (premises)
+    fn match_antecedent_with_premises(&self, store: &Store, patterns: &[Triple]) -> Vec<(Bindings, Vec<Triple>)> {
         if patterns.is_empty() {
-            return vec![Bindings::default()];
+            return vec![(Bindings::default(), Vec::new())];
         }
 
         let first = &patterns[0];
@@ -203,11 +293,10 @@ impl Reasoner {
 
         // Check if this is a built-in predicate
         if let Some(builtin_results) = self.try_builtin_with_bindings(store, first, &Bindings::default()) {
-            // Handle built-in evaluation
             let mut results = Vec::new();
             for bindings in builtin_results {
-                // Continue matching with remaining patterns
-                let remaining = self.match_with_bindings(store, rest, bindings);
+                // Built-in matched - no ground premise for builtins
+                let remaining = self.match_with_bindings_and_premises(store, rest, bindings, Vec::new());
                 results.extend(remaining);
             }
             return results;
@@ -218,21 +307,27 @@ impl Reasoner {
 
         let mut results = Vec::new();
         for bindings in first_matches {
-            // Apply bindings to remaining patterns and continue matching
-            let remaining = self.match_with_bindings(store, rest, bindings);
+            // Get the ground triple that matched this pattern
+            let ground_triple = substitute_triple(first, &bindings);
+            let remaining = self.match_with_bindings_and_premises(store, rest, bindings, vec![ground_triple]);
             results.extend(remaining);
         }
 
         results
     }
 
-    /// Continue matching with partial bindings
-    fn match_with_bindings(&self, store: &Store, patterns: &[Triple], bindings: Bindings) -> Vec<Bindings> {
+    /// Continue matching with partial bindings, tracking premises
+    fn match_with_bindings_and_premises(
+        &self,
+        store: &Store,
+        patterns: &[Triple],
+        bindings: Bindings,
+        premises: Vec<Triple>,
+    ) -> Vec<(Bindings, Vec<Triple>)> {
         if patterns.is_empty() {
-            return vec![bindings];
+            return vec![(bindings, premises)];
         }
 
-        // Substitute bindings into the first pattern
         let pattern = substitute_triple(&patterns[0], &bindings);
         let rest = &patterns[1..];
 
@@ -244,7 +339,8 @@ impl Reasoner {
                 for (var, term) in new_bindings {
                     merged.insert(var, term);
                 }
-                let remaining = self.match_with_bindings(store, rest, merged);
+                // Built-in doesn't add to premises
+                let remaining = self.match_with_bindings_and_premises(store, rest, merged, premises.clone());
                 results.extend(remaining);
             }
             return results;
@@ -259,7 +355,11 @@ impl Reasoner {
             for (var, term) in new_bindings {
                 merged.insert(var, term);
             }
-            let remaining = self.match_with_bindings(store, rest, merged);
+            // Add the ground triple to premises
+            let ground_triple = substitute_triple(&patterns[0], &merged);
+            let mut new_premises = premises.clone();
+            new_premises.push(ground_triple);
+            let remaining = self.match_with_bindings_and_premises(store, rest, merged, new_premises);
             results.extend(remaining);
         }
 
