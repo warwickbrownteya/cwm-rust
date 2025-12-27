@@ -58,6 +58,7 @@ pub mod term;
 pub mod parser;
 pub mod store;
 pub mod reasoner;
+pub mod reasoning;
 pub mod builtins;
 pub mod sparql;
 
@@ -87,3 +88,6 @@ pub use builtins::{BuiltinRegistry, BuiltinResult};
 
 // Re-export SPARQL types
 pub use sparql::{execute_sparql, QueryResult, format_results_xml, format_results_json};
+
+// Re-export reasoning strategies
+pub use reasoning::{ReasoningStrategy, StrategyConfig, ForwardChaining};
