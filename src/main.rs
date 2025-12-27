@@ -60,7 +60,8 @@ impl N3Options {
     }
 }
 
-/// RDF/XML output formatting options
+/// RDF/XML output formatting options (for future --rdf= flag support)
+#[allow(dead_code)]
 #[derive(Default, Clone)]
 struct RdfXmlOptions {
     /// Don't use nodeIDs for blank nodes
@@ -89,6 +90,7 @@ struct RdfXmlOptions {
 }
 
 impl RdfXmlOptions {
+    #[allow(dead_code)]
     fn from_flags(flags: &str) -> Self {
         let mut opts = RdfXmlOptions::default();
         for c in flags.chars() {
@@ -118,7 +120,8 @@ struct ProofStep {
     triple: Triple,
     /// The rule that produced it (if any)
     rule: Option<usize>,
-    /// The bindings used
+    /// The bindings used (for future detailed proof output)
+    #[allow(dead_code)]
     bindings: Vec<(String, Term)>,
     /// The antecedent triples that matched
     antecedents: Vec<Triple>,
@@ -1396,7 +1399,7 @@ fn fetch_document(uri: &str) -> Result<String> {
 fn run_with_proof_tracking(
     reasoner: &mut Reasoner,
     store: &mut Store,
-    rules: &[Rule],
+    _rules: &[Rule],
     proof: &mut ProofTrace,
 ) -> cwm::ReasonerStats {
     // Track which triples existed before reasoning
@@ -1591,7 +1594,7 @@ fn format_term_with_options(term: &Term, prefixes: &IndexMap<String, String>, op
 }
 
 /// Run a SPARQL HTTP endpoint server
-fn run_sparql_server(store: &Store, prefixes: &IndexMap<String, String>, port: u16) -> Result<()> {
+fn run_sparql_server(store: &Store, _prefixes: &IndexMap<String, String>, port: u16) -> Result<()> {
     use tiny_http::{Server, Response, Header};
 
     let addr = format!("0.0.0.0:{}", port);
@@ -1627,7 +1630,7 @@ fn run_sparql_server(store: &Store, prefixes: &IndexMap<String, String>, port: u
                 let mut content = String::new();
                 {
                     use std::io::Read;
-                    let mut reader = request.as_reader();
+                    let reader = request.as_reader();
                     let _ = reader.take(1024 * 1024).read_to_string(&mut content);
                 }
 
@@ -1744,7 +1747,7 @@ use percent_encoding::percent_decode_str;
 /// @prefix : <http://example.org/> .
 /// { ?s :name ?name } => { ?s :hasName ?name } .
 /// ```
-fn execute_n3ql(store: &Store, query_content: &str, prefixes: &IndexMap<String, String>) -> Result<Store> {
+fn execute_n3ql(store: &Store, query_content: &str, _prefixes: &IndexMap<String, String>) -> Result<Store> {
     // Parse the query as N3
     let query_result = parse(query_content)
         .map_err(|e| anyhow::anyhow!("N3QL parse error: {}", e))?;

@@ -335,9 +335,8 @@ impl<'a> SparqlParser<'a> {
     fn parse_ask(&mut self) -> Result<Query, String> {
         self.skip_whitespace();
 
-        if !self.try_keyword("WHERE") {
-            return Err("Expected WHERE".to_string());
-        }
+        // WHERE is optional for ASK - can be "ASK WHERE { ... }" or "ASK { ... }"
+        self.try_keyword("WHERE");
 
         let where_clause = self.parse_where_clause()?;
 
