@@ -681,6 +681,117 @@ impl Default for Reasoner {
     }
 }
 
+// ============================================================================
+// ReasonerBuilder - Fluent API for constructing reasoners
+// ============================================================================
+
+/// Builder for constructing reasoners with custom configuration
+///
+/// Provides a fluent API for composing reasoners:
+///
+/// # Example
+///
+/// ```ignore
+/// use cwm::{ReasonerBuilder, Store};
+///
+/// let reasoner = ReasonerBuilder::new()
+///     .with_max_steps(1000)
+///     .with_tabling(true)
+///     .with_proof_generation(true)
+///     .with_rule(rule)
+///     .build();
+///
+/// reasoner.run(&mut store);
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct ReasonerBuilder {
+    config: ReasonerConfig,
+    rules: Vec<Rule>,
+    custom_builtins: Option<BuiltinRegistry>,
+}
+
+impl ReasonerBuilder {
+    /// Create a new builder with default configuration
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set maximum inference steps
+    pub fn with_max_steps(mut self, max_steps: usize) -> Self {
+        self.config.max_steps = max_steps;
+        self
+    }
+
+    /// Enable or disable tabling (memoization and cycle detection)
+    pub fn with_tabling(mut self, enabled: bool) -> Self {
+        self.config.enable_tabling = enabled;
+        self
+    }
+
+    /// Enable or disable proof generation
+    pub fn with_proof_generation(mut self, enabled: bool) -> Self {
+        self.config.generate_proof = enabled;
+        self
+    }
+
+    /// Enable or disable recursive rule application
+    pub fn with_recursive(mut self, recursive: bool) -> Self {
+        self.config.recursive = recursive;
+        self
+    }
+
+    /// Enable or disable filter mode (think mode)
+    pub fn with_filter(mut self, filter: bool) -> Self {
+        self.config.filter = filter;
+        self
+    }
+
+    /// Set the complete configuration
+    pub fn with_config(mut self, config: ReasonerConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Add a single rule
+    pub fn with_rule(mut self, rule: Rule) -> Self {
+        self.rules.push(rule);
+        self
+    }
+
+    /// Add multiple rules
+    pub fn with_rules(mut self, rules: impl IntoIterator<Item = Rule>) -> Self {
+        self.rules.extend(rules);
+        self
+    }
+
+    /// Use a custom builtin registry
+    pub fn with_builtins(mut self, builtins: BuiltinRegistry) -> Self {
+        self.custom_builtins = Some(builtins);
+        self
+    }
+
+    /// Build the reasoner with all configured options
+    pub fn build(self) -> Reasoner {
+        let generate_proof = self.config.generate_proof;
+        Reasoner {
+            config: self.config,
+            builtins: self.custom_builtins.unwrap_or_else(BuiltinRegistry::new),
+            rules: self.rules,
+            stats: ReasonerStats::default(),
+            proof: if generate_proof { Some(Proof::default()) } else { None },
+            tabling: TablingState::default(),
+            derived_signatures: HashSet::new(),
+        }
+    }
+
+    /// Build and run the reasoner on a store
+    pub fn run(self, store: &mut Store) -> ReasonerStats {
+        let mut reasoner = self.build();
+        reasoner.run(store);
+        reasoner.stats
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

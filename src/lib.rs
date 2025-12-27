@@ -80,7 +80,7 @@ pub use parser::{parse, ParseResult, ParseError, ParserState, Formula, N3Parser}
 pub use store::Store;
 
 // Re-export reasoner types
-pub use reasoner::{Reasoner, Rule, ReasonerConfig, ReasonerStats, Proof, ProofStep, TablingState, StratificationResult};
+pub use reasoner::{Reasoner, ReasonerBuilder, Rule, ReasonerConfig, ReasonerStats, Proof, ProofStep, TablingState, StratificationResult};
 
 // Re-export builtins (legacy compatibility)
 pub use builtins::{BuiltinRegistry, BuiltinResult};

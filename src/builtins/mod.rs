@@ -54,8 +54,17 @@ pub enum BuiltinResult {
 pub type BuiltinFn = fn(&Term, &Term, &Bindings) -> BuiltinResult;
 
 /// Registry of built-in predicates
+#[derive(Clone)]
 pub struct BuiltinRegistry {
     builtins: HashMap<String, BuiltinFn>,
+}
+
+impl std::fmt::Debug for BuiltinRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltinRegistry")
+            .field("count", &self.builtins.len())
+            .finish()
+    }
 }
 
 impl BuiltinRegistry {
