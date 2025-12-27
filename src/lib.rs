@@ -90,4 +90,4 @@ pub use builtins::{BuiltinRegistry, BuiltinResult};
 pub use sparql::{execute_sparql, QueryResult, format_results_xml, format_results_json};
 
 // Re-export reasoning strategies
-pub use reasoning::{ReasoningStrategy, StrategyConfig, ForwardChaining};
+pub use reasoning::{ReasoningStrategy, StrategyConfig, InferenceStats, ForwardChaining, BackwardChaining};
