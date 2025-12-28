@@ -53,6 +53,8 @@ pub struct ParserState {
     base: Option<Uri>,
     /// Active keywords from @keywords directive (None = all N3 keywords active)
     keywords: Option<Vec<String>>,
+    /// Default namespace for bare words (set by @default directive)
+    default_namespace: Option<String>,
 }
 
 impl ParserState {
@@ -119,6 +121,29 @@ impl ParserState {
     /// Check if keywords mode is active (i.e., bare words allowed)
     pub fn keywords_mode(&self) -> bool {
         self.keywords.is_some()
+    }
+
+    /// Set the default namespace from @default directive
+    pub fn set_default_namespace(&mut self, namespace: &str) {
+        self.default_namespace = Some(namespace.to_string());
+        // Also register as the empty prefix
+        self.prefixes.insert(String::new(), namespace.to_string());
+    }
+
+    /// Get the default namespace
+    pub fn default_namespace(&self) -> Option<&str> {
+        self.default_namespace.as_deref()
+    }
+
+    /// Resolve a bare word using default namespace
+    pub fn resolve_bare_word(&self, word: &str) -> Option<Uri> {
+        if let Some(ns) = &self.default_namespace {
+            Some(Uri::new(format!("{}{}", ns, word)))
+        } else if let Some(base) = &self.base {
+            Some(base.resolve(&format!("#{}", word)))
+        } else {
+            Some(Uri::new(format!("#{}", word)))
+        }
     }
 }
 
@@ -395,6 +420,8 @@ impl N3Parser {
             self.parse_forsome_directive(input)
         } else if input.starts_with("@keywords") {
             self.parse_keywords_directive(input)
+        } else if input.starts_with("@default") {
+            self.parse_default_directive(input)
         } else {
             Err(ParseError::Syntax {
                 position: 0,
@@ -550,6 +577,26 @@ impl N3Parser {
                 remaining = input;
             }
         }
+    }
+
+    /// Parse @default directive
+    /// Syntax: @default <namespace>.
+    /// Sets the default namespace for bare words without prefix
+    fn parse_default_directive<'a>(&mut self, input: &'a str) -> Result<&'a str, ParseError> {
+        let input = &input[8..]; // Skip "@default"
+        let (input, _) = ws(input).map_err(|_| ParseError::UnexpectedEof)?;
+
+        // Parse namespace IRI
+        let (input, namespace) = iri_ref(input)
+            .map_err(|_| ParseError::Syntax { position: 0, message: "Expected IRI for default namespace".to_string() })?;
+        let (input, _) = ws(input).map_err(|_| ParseError::UnexpectedEof)?;
+
+        // Expect '.'
+        let (input, _) = char::<&str, nom::error::Error<&str>>('.')(input)
+            .map_err(|_| ParseError::Syntax { position: 0, message: "Expected '.' after @default directive".to_string() })?;
+
+        self.state.set_default_namespace(namespace);
+        Ok(input)
     }
 
     /// Parse SPARQL-style PREFIX/BASE
@@ -795,12 +842,9 @@ impl N3Parser {
                 }
 
                 // Not a keyword, treat as a local name in the default namespace
-                // Resolve against base URI or use as fragment
-                let uri = if let Some(base) = &self.state.base {
-                    base.resolve(&format!("#{}", word))
-                } else {
-                    Uri::new(format!("#{}", word))
-                };
+                // Use @default namespace, or fall back to base URI or fragment
+                let uri = self.state.resolve_bare_word(word)
+                    .unwrap_or_else(|| Uri::new(format!("#{}", word)));
                 return Ok((rest, Term::Uri(Arc::new(uri))));
             }
         }
@@ -1488,5 +1532,23 @@ mod tests {
         // 2. _:b1 ex:age _:b2
         // 3. _:b2 ex:unit "years"
         assert_eq!(result.triples.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_default_directive() {
+        // @default sets the default namespace for bare words
+        let input = r#"
+            @default <http://example.org/> .
+            @keywords a.
+            alice a Person .
+        "#;
+
+        let result = parse(input).unwrap();
+        assert_eq!(result.triples.len(), 1);
+
+        let triple = &result.triples[0];
+        // 'alice' and 'Person' should use the default namespace
+        assert!(format!("{}", triple.subject).contains("http://example.org/alice"));
+        assert!(format!("{}", triple.object).contains("http://example.org/Person"));
     }
 }

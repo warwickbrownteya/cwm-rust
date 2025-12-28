@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indexmap::IndexMap;
 
-use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule};
+use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule, List};
 
 /// N3 output formatting options
 #[derive(Default, Clone)]
@@ -1560,6 +1560,8 @@ fn apply_patch(store: &mut Store, patch_content: &str, prefixes: &mut IndexMap<S
 ///   p - smush on same predicates
 ///   o - smush on same objects
 ///   t - transitive closure (owl:TransitiveProperty)
+///   n - IRI normalize (canonicalize URIs: lowercase scheme/host, decode/encode path)
+///   T - truth (filter out log:Falsehood, keep only true statements)
 ///   E - error on import failure (vs. warning)
 fn load_closure(
     store: &mut Store,
@@ -1575,6 +1577,13 @@ fn load_closure(
     let smush_predicates = flags.contains('p');
     let smush_objects = flags.contains('o');
     let transitive_closure = flags.contains('t');
+    let iri_normalize = flags.contains('n');
+    let truth_filter = flags.contains('T');
+
+    // Perform IRI normalization if requested
+    if iri_normalize {
+        perform_iri_normalization(store, verbose);
+    }
 
     // Perform equality smushing if requested
     if smush_equality {
@@ -1589,6 +1598,11 @@ fn load_closure(
     // Perform component smushing if requested
     if smush_subjects || smush_predicates || smush_objects {
         perform_component_smushing(store, smush_subjects, smush_predicates, smush_objects, verbose);
+    }
+
+    // Perform truth filtering if requested (remove log:Falsehood assertions)
+    if truth_filter {
+        perform_truth_filter(store, verbose);
     }
 
     if !load_imports && !load_rules {
@@ -1873,6 +1887,189 @@ fn perform_component_smushing(
 
     if verbose && groups > 0 {
         eprintln!("Component smushing: analyzed {} group(s)", groups);
+    }
+}
+
+/// Perform IRI normalization: canonicalize URIs
+/// - Lowercase scheme and host
+/// - Percent-decode/encode path consistently
+/// - Remove default ports (80 for http, 443 for https)
+/// - Remove empty query strings and fragments
+fn perform_iri_normalization(store: &mut Store, verbose: bool) {
+    use std::collections::HashSet;
+
+    fn normalize_uri(uri_str: &str) -> String {
+        // Parse the URI into components
+        let s = uri_str.to_string();
+
+        // Find scheme
+        if let Some(scheme_end) = s.find("://") {
+            let scheme = s[..scheme_end].to_lowercase();
+            let rest = &s[scheme_end + 3..];
+
+            // Find host/port and path
+            let (authority, path_and_rest) = if let Some(slash) = rest.find('/') {
+                (&rest[..slash], &rest[slash..])
+            } else if let Some(q) = rest.find('?') {
+                (&rest[..q], &rest[q..])
+            } else if let Some(h) = rest.find('#') {
+                (&rest[..h], &rest[h..])
+            } else {
+                (rest, "")
+            };
+
+            // Lowercase host, handle port
+            let host_port = authority.to_lowercase();
+            let normalized_authority = if scheme == "http" && host_port.ends_with(":80") {
+                host_port[..host_port.len()-3].to_string()
+            } else if scheme == "https" && host_port.ends_with(":443") {
+                host_port[..host_port.len()-4].to_string()
+            } else {
+                host_port
+            };
+
+            // Normalize path: remove empty query/fragment
+            let normalized_path = if path_and_rest == "?" || path_and_rest == "#" {
+                String::new()
+            } else {
+                path_and_rest.to_string()
+            };
+
+            format!("{}://{}{}", scheme, normalized_authority, normalized_path)
+        } else {
+            // Not a URL with scheme, return as-is
+            s
+        }
+    }
+
+    fn normalize_term(term: &Term) -> Term {
+        match term {
+            Term::Uri(uri) => {
+                let normalized = normalize_uri(uri.as_str());
+                if normalized != uri.as_str() {
+                    Term::uri(&normalized)
+                } else {
+                    term.clone()
+                }
+            }
+            Term::Formula(f) => {
+                let normalized_triples: Vec<Triple> = f.triples().iter()
+                    .map(|t| Triple::new(
+                        normalize_term(&t.subject),
+                        normalize_term(&t.predicate),
+                        normalize_term(&t.object),
+                    ))
+                    .collect();
+                Term::Formula(FormulaRef::new(f.id(), normalized_triples))
+            }
+            Term::List(list_arc) => {
+                let normalized: Vec<Term> = list_arc.to_vec().iter()
+                    .map(|t| normalize_term(t))
+                    .collect();
+                Term::List(std::sync::Arc::new(List::from_vec(normalized)))
+            }
+            _ => term.clone(),
+        }
+    }
+
+    // Collect normalized triples
+    let mut normalized_triples: Vec<Triple> = Vec::new();
+    let mut changes = 0;
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for triple in store.iter() {
+        let new_subj = normalize_term(&triple.subject);
+        let new_pred = normalize_term(&triple.predicate);
+        let new_obj = normalize_term(&triple.object);
+
+        let changed = new_subj != triple.subject
+            || new_pred != triple.predicate
+            || new_obj != triple.object;
+
+        if changed {
+            changes += 1;
+        }
+
+        let key = format!("{} {} {}", new_subj, new_pred, new_obj);
+        if !seen.contains(&key) {
+            seen.insert(key);
+            normalized_triples.push(Triple::new(new_subj, new_pred, new_obj));
+        }
+    }
+
+    // Replace store contents if there were changes
+    if changes > 0 {
+        store.clear();
+        store.add_all(normalized_triples);
+        if verbose {
+            eprintln!("IRI normalization: updated {} URI(s)", changes);
+        }
+    }
+}
+
+/// Perform truth filtering: remove statements marked as false
+/// Removes triples that are asserted as log:Falsehood or negated
+fn perform_truth_filter(store: &mut Store, verbose: bool) {
+    let log_falsehood = "http://www.w3.org/2000/10/swap/log#Falsehood";
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let log_notincludes = "http://www.w3.org/2000/10/swap/log#notIncludes";
+
+    // Find all statements that are marked as false
+    let mut false_formulas: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Find formulas typed as log:Falsehood
+    for triple in store.iter() {
+        if let (Term::Uri(pred), Term::Uri(obj)) = (&triple.predicate, &triple.object) {
+            if pred.as_str() == rdf_type && obj.as_str() == log_falsehood {
+                false_formulas.insert(format!("{}", triple.subject));
+            }
+        }
+    }
+
+    // Find formulas that are objects of log:notIncludes (negated)
+    for triple in store.iter() {
+        if let Term::Uri(pred) = &triple.predicate {
+            if pred.as_str() == log_notincludes {
+                // The object is something that should NOT be in the model
+                false_formulas.insert(format!("{}", triple.object));
+            }
+        }
+    }
+
+    if false_formulas.is_empty() {
+        return;
+    }
+
+    // Filter out false statements
+    let original_count = store.len();
+    let mut filtered_triples: Vec<Triple> = Vec::new();
+
+    for triple in store.iter() {
+        let subj_str = format!("{}", triple.subject);
+
+        // Skip if subject is a false formula
+        if false_formulas.contains(&subj_str) {
+            continue;
+        }
+
+        // Skip log:Falsehood type assertions themselves
+        if let (Term::Uri(pred), Term::Uri(obj)) = (&triple.predicate, &triple.object) {
+            if pred.as_str() == rdf_type && obj.as_str() == log_falsehood {
+                continue;
+            }
+        }
+
+        filtered_triples.push(triple.clone());
+    }
+
+    let removed = original_count - filtered_triples.len();
+
+    if removed > 0 {
+        store.clear();
+        store.add_all(filtered_triples);
+        if verbose {
+            eprintln!("Truth filter: removed {} false statement(s)", removed);
+        }
     }
 }
 

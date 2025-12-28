@@ -81,10 +81,16 @@ pub enum GraphPattern {
     Bind(FilterExpr, String),
     /// Subquery group
     Group(Box<WhereClause>),
-    /// SERVICE for federated queries (endpoint URI, patterns, silent flag)
-    Service(String, Box<WhereClause>, bool),
+    /// SERVICE for federated queries (endpoint URI or variable, patterns, silent flag)
+    Service(TermPattern, Box<WhereClause>, bool),
     /// Nested subquery (SELECT inside WHERE)
     Subquery(Box<Query>),
+    /// VALUES inline data (variables, data rows)
+    Values(Vec<String>, Vec<Vec<Option<Term>>>),
+    /// MINUS pattern (set difference)
+    Minus(Box<WhereClause>),
+    /// GRAPH named graph pattern (graph IRI or variable, patterns)
+    Graph(TermPattern, Box<WhereClause>),
 }
 
 /// Triple pattern with possible variables
@@ -815,14 +821,14 @@ impl<'a> SparqlParser<'a> {
             }
 
             // Check for SERVICE (federated query)
-            let silent = if self.try_keyword("SERVICE") {
+            if self.try_keyword("SERVICE") {
                 self.skip_whitespace();
                 let is_silent = self.try_keyword("SILENT");
                 if is_silent {
                     self.skip_whitespace();
                 }
 
-                // Parse endpoint URI
+                // Parse endpoint (URI or variable)
                 let endpoint = if self.current_char() == '<' {
                     self.pos += 1;
                     let start = self.pos;
@@ -833,22 +839,48 @@ impl<'a> SparqlParser<'a> {
                     if self.current_char() == '>' {
                         self.pos += 1;
                     }
-                    uri
+                    TermPattern::Term(Term::uri(&uri))
                 } else if self.current_char() == '?' || self.current_char() == '$' {
-                    // Variable endpoint - not supported yet, skip
-                    return Err("Variable SERVICE endpoints not yet supported".to_string());
+                    // Variable endpoint
+                    self.pos += 1;
+                    let start = self.pos;
+                    while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                        self.pos += 1;
+                    }
+                    let var_name = self.input[start..self.pos].to_string();
+                    TermPattern::Variable(var_name)
                 } else {
-                    return Err("Expected URI after SERVICE".to_string());
+                    return Err("Expected URI or variable after SERVICE".to_string());
                 };
 
                 // Parse the service pattern
                 let service_clause = self.parse_where_clause()?;
                 patterns.push(GraphPattern::Service(endpoint, Box::new(service_clause), is_silent));
                 continue;
-            } else {
-                false
-            };
-            let _ = silent; // Suppress unused warning
+            }
+
+            // Check for VALUES inline data
+            if self.try_keyword("VALUES") {
+                let values_pattern = self.parse_values_clause()?;
+                patterns.push(values_pattern);
+                continue;
+            }
+
+            // Check for MINUS (set difference)
+            if self.try_keyword("MINUS") {
+                let minus_clause = self.parse_where_clause()?;
+                patterns.push(GraphPattern::Minus(Box::new(minus_clause)));
+                continue;
+            }
+
+            // Check for GRAPH named graph pattern
+            if self.try_keyword("GRAPH") {
+                self.skip_whitespace();
+                let graph_term = self.parse_term_pattern()?;
+                let graph_clause = self.parse_where_clause()?;
+                patterns.push(GraphPattern::Graph(graph_term, Box::new(graph_clause)));
+                continue;
+            }
 
             // Check for nested group or subquery
             if self.current_char() == '{' {
@@ -1204,6 +1236,111 @@ impl<'a> SparqlParser<'a> {
             Ok(Term::typed_literal(num_str, "http://www.w3.org/2001/XMLSchema#decimal"))
         } else {
             Ok(Term::typed_literal(num_str, "http://www.w3.org/2001/XMLSchema#integer"))
+        }
+    }
+
+    /// Parse VALUES clause: VALUES (?var1 ?var2 ...) { (val1 val2 ...) (val3 val4 ...) ... }
+    /// Or single variable form: VALUES ?var { val1 val2 ... }
+    fn parse_values_clause(&mut self) -> Result<GraphPattern, String> {
+        self.skip_whitespace();
+
+        let mut variables = Vec::new();
+        let mut data_rows: Vec<Vec<Option<Term>>> = Vec::new();
+
+        // Check if it's a single variable or a list of variables
+        if self.current_char() == '(' {
+            // Multiple variables: VALUES (?x ?y) { ... }
+            self.pos += 1; // consume '('
+            loop {
+                self.skip_whitespace();
+                if self.current_char() == ')' {
+                    self.pos += 1;
+                    break;
+                }
+                if self.current_char() == '?' || self.current_char() == '$' {
+                    self.pos += 1;
+                    let start = self.pos;
+                    while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                        self.pos += 1;
+                    }
+                    variables.push(self.input[start..self.pos].to_string());
+                } else if self.pos >= self.input.len() {
+                    return Err("Unexpected end of input in VALUES variables".to_string());
+                } else {
+                    return Err(format!("Expected variable in VALUES, got '{}'", self.current_char()));
+                }
+            }
+        } else if self.current_char() == '?' || self.current_char() == '$' {
+            // Single variable: VALUES ?x { ... }
+            self.pos += 1;
+            let start = self.pos;
+            while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                self.pos += 1;
+            }
+            variables.push(self.input[start..self.pos].to_string());
+        } else {
+            return Err("Expected variable or ( after VALUES".to_string());
+        }
+
+        // Now parse the data block { ... }
+        self.skip_whitespace();
+        if self.current_char() != '{' {
+            return Err("Expected { after VALUES variables".to_string());
+        }
+        self.pos += 1;
+
+        // Parse data rows
+        loop {
+            self.skip_whitespace();
+            if self.current_char() == '}' {
+                self.pos += 1;
+                break;
+            }
+
+            if variables.len() == 1 {
+                // Single variable: each value is a row
+                let value = self.parse_values_data_value()?;
+                data_rows.push(vec![value]);
+            } else {
+                // Multiple variables: each row is wrapped in ()
+                if self.current_char() != '(' {
+                    return Err("Expected ( for VALUES data row".to_string());
+                }
+                self.pos += 1;
+
+                let mut row = Vec::new();
+                for _ in 0..variables.len() {
+                    self.skip_whitespace();
+                    row.push(self.parse_values_data_value()?);
+                }
+
+                self.skip_whitespace();
+                if self.current_char() != ')' {
+                    return Err("Expected ) after VALUES data row".to_string());
+                }
+                self.pos += 1;
+                data_rows.push(row);
+            }
+        }
+
+        Ok(GraphPattern::Values(variables, data_rows))
+    }
+
+    /// Parse a single value in VALUES data block (or UNDEF)
+    fn parse_values_data_value(&mut self) -> Result<Option<Term>, String> {
+        self.skip_whitespace();
+
+        // Check for UNDEF
+        if self.try_keyword("UNDEF") {
+            return Ok(None);
+        }
+
+        // Parse a term (IRI, literal, etc.)
+        match self.parse_term_pattern() {
+            Ok(TermPattern::Term(t)) => Ok(Some(t)),
+            Ok(TermPattern::Variable(_)) => Err("Variables not allowed in VALUES data".to_string()),
+            Ok(TermPattern::Path(_)) => Err("Paths not allowed in VALUES data".to_string()),
+            Err(e) => Err(e),
         }
     }
 
@@ -1763,6 +1900,79 @@ impl<'a> SparqlEngine<'a> {
                 // Execute the nested subquery and join with current solutions
                 self.evaluate_subquery(subquery, solutions)
             }
+            GraphPattern::Values(variables, data_rows) => {
+                // VALUES provides inline data to join with current solutions
+                let mut new_solutions = Vec::new();
+
+                for solution in solutions {
+                    for row in data_rows {
+                        let mut new_sol = solution.clone();
+                        let mut compatible = true;
+
+                        for (i, var) in variables.iter().enumerate() {
+                            if let Some(Some(value)) = row.get(i) {
+                                // Check if already bound with same value
+                                if let Some(existing) = solution.get(var) {
+                                    if existing != value {
+                                        compatible = false;
+                                        break;
+                                    }
+                                } else {
+                                    new_sol.insert(var.clone(), value.clone());
+                                }
+                            }
+                            // UNDEF (None) is compatible with any binding
+                        }
+
+                        if compatible {
+                            new_solutions.push(new_sol);
+                        }
+                    }
+                }
+
+                new_solutions
+            }
+            GraphPattern::Minus(minus_clause) => {
+                // MINUS removes solutions that match the minus clause
+                let minus_solutions = self.evaluate_where_with_solutions(minus_clause, solutions.clone());
+
+                solutions.into_iter().filter(|sol| {
+                    // Keep solution if no minus solution is compatible
+                    !minus_solutions.iter().any(|minus_sol| {
+                        // Check if minus_sol is compatible with sol
+                        // Compatible means all shared variables have same values
+                        minus_sol.iter().all(|(var, value)| {
+                            sol.get(var).map(|v| v == value).unwrap_or(true)
+                        })
+                    })
+                }).collect()
+            }
+            GraphPattern::Graph(graph_term, graph_clause) => {
+                // GRAPH specifies a named graph - for now, we treat all data as default graph
+                // A full implementation would require named graph support in the store
+                match graph_term {
+                    TermPattern::Term(_uri) => {
+                        // Fixed graph URI - evaluate patterns against that graph
+                        // For now, just evaluate against the store
+                        self.evaluate_where_with_solutions(graph_clause, solutions)
+                    }
+                    TermPattern::Variable(var) => {
+                        // Variable graph - would need to enumerate all graphs
+                        // For now, bind to a placeholder indicating no named graph support
+                        let mut new_solutions = Vec::new();
+                        for mut sol in self.evaluate_where_with_solutions(graph_clause, solutions) {
+                            // Bind graph variable to default graph URI
+                            sol.insert(var.clone(), Term::uri("urn:x-local:default-graph"));
+                            new_solutions.push(sol);
+                        }
+                        new_solutions
+                    }
+                    TermPattern::Path(_) => {
+                        // Invalid - paths in GRAPH position
+                        solutions
+                    }
+                }
+            }
         }
     }
 
@@ -1814,7 +2024,7 @@ impl<'a> SparqlEngine<'a> {
     /// Execute a SERVICE query against a remote SPARQL endpoint
     fn evaluate_service(
         &self,
-        endpoint: &str,
+        endpoint_pattern: &TermPattern,
         service_clause: &WhereClause,
         solutions: Vec<HashMap<String, Term>>,
         silent: bool,
@@ -1822,11 +2032,39 @@ impl<'a> SparqlEngine<'a> {
         let mut result = Vec::new();
 
         for solution in solutions {
+            // Resolve endpoint from pattern
+            let endpoint_uri = match endpoint_pattern {
+                TermPattern::Term(Term::Uri(uri)) => uri.as_str().to_string(),
+                TermPattern::Variable(var) => {
+                    // Look up variable in current bindings
+                    if let Some(Term::Uri(uri)) = solution.get(var) {
+                        uri.as_str().to_string()
+                    } else {
+                        if !silent {
+                            eprintln!("SERVICE error: variable ?{} not bound to URI", var);
+                        }
+                        if silent {
+                            result.push(solution.clone());
+                        }
+                        continue;
+                    }
+                }
+                _ => {
+                    if !silent {
+                        eprintln!("SERVICE error: invalid endpoint pattern");
+                    }
+                    if silent {
+                        result.push(solution.clone());
+                    }
+                    continue;
+                }
+            };
+
             // Build a SPARQL query from the service clause
             let query = self.build_service_query(service_clause, &solution);
 
             // Execute against remote endpoint
-            match self.execute_remote_query(endpoint, &query) {
+            match self.execute_remote_query(&endpoint_uri, &query) {
                 Ok(remote_solutions) => {
                     // Merge remote solutions with current solution
                     for remote_sol in remote_solutions {
@@ -1837,7 +2075,7 @@ impl<'a> SparqlEngine<'a> {
                 }
                 Err(e) => {
                     if !silent {
-                        eprintln!("SERVICE error for {}: {}", endpoint, e);
+                        eprintln!("SERVICE error for {}: {}", endpoint_uri, e);
                     }
                     // If silent, continue with current solution unchanged
                     if silent {
@@ -1886,6 +2124,16 @@ impl<'a> SparqlEngine<'a> {
                         for var in variables {
                             vars.insert(var.clone());
                         }
+                    }
+                }
+                GraphPattern::Values(variables, _) => {
+                    for v in variables {
+                        vars.insert(v.clone());
+                    }
+                }
+                GraphPattern::Minus(inner) | GraphPattern::Graph(_, inner) => {
+                    for p in &inner.patterns {
+                        collect_vars_from_pattern(p, vars);
                     }
                 }
             }

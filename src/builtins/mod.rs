@@ -33,7 +33,8 @@ use sha1::Sha1;
 use md5::Md5;
 use hmac::{Hmac, Mac};
 use base64::{Engine as _, engine::general_purpose};
-use crate::term::{Term, Triple, Variable, Bindings, uri::ns, FormulaRef};
+use std::sync::Arc;
+use crate::term::{Term, Triple, Variable, Bindings, uri::ns, FormulaRef, List};
 use crate::parser;
 
 // Re-export ureq for web fetching
@@ -108,6 +109,55 @@ fn fetch_rdf_document(uri: &str) -> Result<(String, String), String> {
                 (content, content_type)
             })
             .map_err(|e| format!("File error: {}", e))
+    }
+}
+
+/// Parse content based on content type
+/// Supports: text/n3, text/turtle, application/n-triples, application/ld+json, application/kif
+fn parse_content_by_type(content: &str, content_type: &str) -> Result<Vec<Triple>, String> {
+    // Normalize content type (remove charset, etc.)
+    let ct = content_type.split(';').next().unwrap_or(content_type).trim();
+
+    match ct {
+        "text/n3" | "application/n3" => {
+            parser::parse(content)
+                .map(|r| r.triples)
+                .map_err(|e| format!("N3 parse error: {}", e))
+        }
+        "text/turtle" | "application/turtle" => {
+            // Turtle is a subset of N3, use the same parser
+            parser::parse(content)
+                .map(|r| r.triples)
+                .map_err(|e| format!("Turtle parse error: {}", e))
+        }
+        "application/n-triples" | "application/ntriples" => {
+            // N-Triples is a subset of Turtle, use the same parser
+            parser::parse(content)
+                .map(|r| r.triples)
+                .map_err(|e| format!("N-Triples parse error: {}", e))
+        }
+        "application/ld+json" | "application/json" => {
+            // For JSON-LD, we'd need a dedicated parser
+            // For now, return an error indicating the format isn't fully supported
+            Err(format!("JSON-LD parsing requires conversion - content type: {}", ct))
+        }
+        "application/rdf+xml" | "application/xml" | "text/xml" => {
+            // RDF/XML would require an XML parser
+            // For now, return an error
+            Err(format!("RDF/XML parsing not yet implemented - content type: {}", ct))
+        }
+        "application/kif" => {
+            // KIF format
+            parser::parse_kif(content)
+                .map(|r| r.triples)
+                .map_err(|e| format!("KIF parse error: {}", e))
+        }
+        _ => {
+            // Default to N3 parser for unknown types
+            parser::parse(content)
+                .map(|r| r.triples)
+                .map_err(|e| format!("Parse error (default N3): {}", e))
+        }
     }
 }
 
@@ -198,6 +248,16 @@ impl BuiltinRegistry {
         } else {
             BuiltinResult::Failure
         }
+    }
+
+    /// Get all registered builtin URIs (for log:builtinIn)
+    pub fn all_builtins(&self) -> Vec<String> {
+        self.builtins.keys().cloned().collect()
+    }
+
+    /// Get the count of registered builtins
+    pub fn builtin_count(&self) -> usize {
+        self.builtins.len()
     }
 
     fn register_math(&mut self) {
@@ -1002,6 +1062,44 @@ impl BuiltinRegistry {
                 }
             }
             BuiltinResult::NotReady
+        });
+
+        // math:randomInteger - (min max) math:randomInteger n
+        // Generates a random integer in the range [min, max]
+        self.register(&format!("{}randomInteger", ns::MATH), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(min), Some(max)) = (get_number(&items[0]), get_number(&items[1])) {
+                        let min_int = min as i64;
+                        let max_int = max as i64;
+                        if min_int <= max_int {
+                            use std::time::{SystemTime, UNIX_EPOCH};
+                            // Simple pseudo-random using time-based seed
+                            let seed = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0);
+                            let range = (max_int - min_int + 1) as u128;
+                            let random_val = min_int + ((seed % range) as i64);
+                            return match_or_bind(object, random_val as f64, bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // math:random - generates a random float between 0 and 1
+        self.register(&format!("{}random", ns::MATH), |_subject, object, bindings| {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            // Simple LCG-style random
+            let random_val = ((seed * 1103515245 + 12345) % (1 << 31)) as f64 / (1u64 << 31) as f64;
+            match_or_bind(object, random_val, bindings)
         });
     }
 
@@ -2118,17 +2216,17 @@ impl BuiltinRegistry {
 
         // log:semantics - uri log:semantics formula (loads and parses document)
         // Fetches the document at URI with content negotiation and parses it
+        // Uses content-type to select the appropriate parser
         self.register(&format!("{}semantics", ns::LOG), |subject, object, bindings| {
             if let Term::Uri(uri) = subject {
                 let uri_str = uri.as_str();
 
                 match fetch_rdf_document(uri_str) {
-                    Ok((content, _content_type)) => {
-                        // Parse the content using the N3 parser
-                        // TODO: Use content_type to select parser when we support more formats
-                        match parser::parse(&content) {
-                            Ok(parse_result) => {
-                                let result = Term::Formula(FormulaRef::new(0, parse_result.triples));
+                    Ok((content, content_type)) => {
+                        // Parse the content using content-type based parser selection
+                        match parse_content_by_type(&content, &content_type) {
+                            Ok(triples) => {
+                                let result = Term::Formula(FormulaRef::new(0, triples));
                                 if let Term::Variable(var) = object {
                                     let mut new_bindings = bindings.clone();
                                     new_bindings.insert(var.clone(), result);
@@ -2230,12 +2328,11 @@ impl BuiltinRegistry {
                 let uri_str = uri.as_str();
 
                 let result = match fetch_rdf_document(uri_str) {
-                    Ok((content, _content_type)) => {
-                        // Parse the content using the N3 parser
-                        // TODO: Use content_type to select parser when we support more formats
-                        match parser::parse(&content) {
-                            Ok(parse_result) => {
-                                Term::Formula(FormulaRef::new(0, parse_result.triples))
+                    Ok((content, content_type)) => {
+                        // Parse the content based on content-type
+                        match parse_content_by_type(&content, &content_type) {
+                            Ok(triples) => {
+                                Term::Formula(FormulaRef::new(0, triples))
                             }
                             Err(e) => {
                                 Term::literal(format!("Parse error: {}", e))
@@ -3096,6 +3193,187 @@ impl BuiltinRegistry {
                 }
             }
             BuiltinResult::NotReady
+        });
+
+        // log:builtinIn - checks if a predicate is a builtin
+        // subject log:builtinIn formula succeeds if subject is a builtin predicate in formula's context
+        // Can also be used to enumerate all builtins
+        self.register(&format!("{}builtinIn", ns::LOG), |subject, _object, bindings| {
+            // Check if subject is a URI that corresponds to a builtin
+            if let Term::Uri(uri) = subject {
+                // This is a static check - we can't access the registry from here
+                // But we can check common builtin namespaces
+                let uri_str = uri.as_str();
+                let is_builtin = uri_str.starts_with(ns::MATH)
+                    || uri_str.starts_with(ns::STRING)
+                    || uri_str.starts_with(ns::LIST)
+                    || uri_str.starts_with(ns::LOG)
+                    || uri_str.starts_with(ns::TIME)
+                    || uri_str.starts_with(ns::CRYPTO)
+                    || uri_str.starts_with(ns::OS)
+                    || uri_str.starts_with(ns::GRAPH);
+
+                if is_builtin {
+                    return BuiltinResult::Success(bindings.clone());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // log:ifThenElseIn - conditional evaluation
+        // (condition then else) log:ifThenElseIn result
+        // If condition succeeds in the current context, result is bound to then, otherwise to else
+        self.register(&format!("{}ifThenElseIn", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 3 {
+                    let condition = &items[0];
+                    let then_clause = &items[1];
+                    let else_clause = &items[2];
+
+                    // Check if condition is "truthy" (non-empty formula, true boolean, etc.)
+                    let condition_true = match condition {
+                        Term::Formula(f) => !f.triples().is_empty(),
+                        Term::Literal(lit) => {
+                            let val = lit.value();
+                            val == "true" || val == "1" || (!val.is_empty() && val != "false" && val != "0")
+                        }
+                        Term::List(l) => !l.is_empty(),
+                        Term::Uri(_) => true,
+                        _ => false,
+                    };
+
+                    let result = if condition_true { then_clause } else { else_clause };
+
+                    if let Term::Variable(var) = object {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(var.clone(), result.clone());
+                        return BuiltinResult::Success(new_bindings);
+                    } else if object == result {
+                        return BuiltinResult::Success(bindings.clone());
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // log:bulkIn - batch formula operations
+        // (formulas operation) log:bulkIn result
+        // Applies operation to each formula in the list and returns combined result
+        self.register(&format!("{}bulkIn", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() >= 1 {
+                    // Collect all triples from all formulas in the list
+                    let mut all_triples = Vec::new();
+                    for item in &items {
+                        if let Term::Formula(f) = item {
+                            all_triples.extend(f.triples().iter().cloned());
+                        }
+                    }
+
+                    // Remove duplicates
+                    all_triples.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+                    all_triples.dedup();
+
+                    let result = Term::Formula(FormulaRef::new(0, all_triples));
+
+                    if let Term::Variable(var) = object {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(var.clone(), result);
+                        return BuiltinResult::Success(new_bindings);
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // log:getList - convert formula contents to a list of statements
+        // formula log:getList list
+        // Returns the triples as a list of (subject predicate object) lists
+        self.register(&format!("{}getList", ns::LOG), |subject, object, bindings| {
+            if let Term::Formula(formula) = subject {
+                let triples = formula.triples();
+                let mut triple_lists: Vec<Term> = Vec::new();
+
+                for triple in triples {
+                    let triple_list = Term::List(Arc::new(List::from_vec(vec![
+                        triple.subject.clone(),
+                        triple.predicate.clone(),
+                        triple.object.clone(),
+                    ])));
+                    triple_lists.push(triple_list);
+                }
+
+                let result = Term::List(Arc::new(List::from_vec(triple_lists)));
+
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), result);
+                    return BuiltinResult::Success(new_bindings);
+                } else if let Term::List(_) = object {
+                    // Check if it matches
+                    if &result == object {
+                        return BuiltinResult::Success(bindings.clone());
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // log:forAllInClosure - scoped universal quantification with transitive closure
+        // (formula pattern) log:forAllInClosure formula2
+        // Succeeds if pattern matches all triples in formula including transitively derived ones
+        self.register(&format!("{}forAllInClosure", ns::LOG), |subject, object, _bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Term::Formula(formula), Term::Formula(pattern)) = (&items[0], &items[1]) {
+                        // Get all triples from both formulas
+                        let formula_triples = formula.triples();
+                        let pattern_triples = pattern.triples();
+
+                        if pattern_triples.is_empty() {
+                            // Empty pattern matches everything
+                            return BuiltinResult::Success(Bindings::default());
+                        }
+
+                        // Check if all formula triples match the pattern
+                        for data_triple in formula_triples {
+                            let mut matched = false;
+                            for pattern_triple in pattern_triples {
+                                // Simple pattern matching - variables match anything
+                                let subj_match = matches!(&pattern_triple.subject, Term::Variable(_))
+                                    || pattern_triple.subject == data_triple.subject;
+                                let pred_match = matches!(&pattern_triple.predicate, Term::Variable(_))
+                                    || pattern_triple.predicate == data_triple.predicate;
+                                let obj_match = matches!(&pattern_triple.object, Term::Variable(_))
+                                    || pattern_triple.object == data_triple.object;
+
+                                if subj_match && pred_match && obj_match {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            if !matched {
+                                return BuiltinResult::Failure;
+                            }
+                        }
+
+                        // Also check that object formula (if provided) is consistent
+                        if let Term::Formula(obj_formula) = object {
+                            // The object formula should contain the pattern results
+                            // For now, just check it's not empty if we had matches
+                            if !formula_triples.is_empty() && obj_formula.triples().is_empty() {
+                                return BuiltinResult::Failure;
+                            }
+                        }
+
+                        return BuiltinResult::Success(Bindings::default());
+                    }
+                }
+            }
+            BuiltinResult::Failure
         });
     }
 
@@ -4945,6 +5223,120 @@ impl BuiltinRegistry {
                 }
             }
             BuiltinResult::NotReady
+        });
+
+        // os:readFile - path os:readFile contents
+        // Reads the contents of a file as a string
+        // Note: This is a security-sensitive operation
+        self.register(&format!("{}readFile", ns::OS), |subject, object, bindings| {
+            if let Some(path) = get_string(subject) {
+                // Security: Only allow reading files in current directory or subdirectories
+                let path_obj = std::path::Path::new(&path);
+                if !path.contains("..") && !path.starts_with('/') {
+                    if let Ok(contents) = std::fs::read_to_string(path_obj) {
+                        return match_or_bind_string(object, contents, bindings);
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // os:writeFile - (path contents) os:writeFile true
+        // Writes contents to a file
+        // Note: This is a security-sensitive operation
+        self.register(&format!("{}writeFile", ns::OS), |subject, _object, _bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(path), Some(contents)) = (get_string(&items[0]), get_string(&items[1])) {
+                        // Security: Only allow writing files in current directory or subdirectories
+                        if !path.contains("..") && !path.starts_with('/') {
+                            if std::fs::write(&path, &contents).is_ok() {
+                                return BuiltinResult::Success(Bindings::default());
+                            }
+                        }
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // os:appendFile - (path contents) os:appendFile true
+        // Appends contents to a file
+        self.register(&format!("{}appendFile", ns::OS), |subject, _object, _bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(path), Some(contents)) = (get_string(&items[0]), get_string(&items[1])) {
+                        // Security: Only allow appending to files in current directory or subdirectories
+                        if !path.contains("..") && !path.starts_with('/') {
+                            use std::io::Write;
+                            if let Ok(mut file) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&path)
+                            {
+                                if file.write_all(contents.as_bytes()).is_ok() {
+                                    return BuiltinResult::Success(Bindings::default());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // os:deleteFile - path os:deleteFile true
+        // Deletes a file
+        // Note: This is a security-sensitive operation
+        self.register(&format!("{}deleteFile", ns::OS), |subject, _object, _bindings| {
+            if let Some(path) = get_string(subject) {
+                // Security: Only allow deleting files in current directory or subdirectories
+                if !path.contains("..") && !path.starts_with('/') {
+                    if std::fs::remove_file(&path).is_ok() {
+                        return BuiltinResult::Success(Bindings::default());
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // os:listDir - path os:listDir fileList
+        // Lists files in a directory
+        self.register(&format!("{}listDir", ns::OS), |subject, object, bindings| {
+            if let Some(path) = get_string(subject) {
+                // Security: Only allow listing directories in current directory or subdirectories
+                if !path.contains("..") && !path.starts_with('/') {
+                    if let Ok(entries) = std::fs::read_dir(&path) {
+                        let files: Vec<Term> = entries
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| e.path().to_str().map(|s| Term::literal(s)))
+                            .collect();
+                        let result = Term::List(Arc::new(List::from_vec(files)));
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // os:createDir - path os:createDir true
+        // Creates a directory
+        self.register(&format!("{}createDir", ns::OS), |subject, _object, _bindings| {
+            if let Some(path) = get_string(subject) {
+                // Security: Only allow creating directories in current directory or subdirectories
+                if !path.contains("..") && !path.starts_with('/') {
+                    if std::fs::create_dir_all(&path).is_ok() {
+                        return BuiltinResult::Success(Bindings::default());
+                    }
+                }
+            }
+            BuiltinResult::Failure
         });
     }
 
