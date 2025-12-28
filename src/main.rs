@@ -157,7 +157,19 @@ struct ProofTrace {
 #[command(name = "cwm")]
 #[command(author = "CWM Rust Authors")]
 #[command(version = "0.1.0")]
-#[command(about = "Closed World Machine - N3 reasoner and RDF processor", long_about = None)]
+#[command(about = "Closed World Machine - N3 reasoner and RDF processor")]
+#[command(long_about = "cwm-rust is a high-performance N3 reasoner and RDF processor with:\n\n\
+  - 266+ built-in predicates (math, string, list, log, time, crypto, os, graph)\n\
+  - 11 theorem proving engines (resolution, otter, dpll, cdcl, tableau, etc.)\n\
+  - Full SPARQL 1.1 support with XML/JSON results\n\
+  - Apache Jena Fuseki integration\n\
+  - Multiple output formats: N3, N-Triples, RDF/XML, JSON-LD\n\n\
+Examples:\n\
+  cwm data.n3 --think              # Forward-chaining inference\n\
+  cwm data.n3 --sparql-query \"...\" # Run SPARQL query\n\
+  cwm data.n3 --engine otter       # Use theorem prover\n\
+  cwm data.n3 --sparqlServer 8000  # Start SPARQL endpoint\n\n\
+Documentation: See README.md, docs/BUILTINS.md, docs/cwm.1")]
 struct Cli {
     /// Input files to process
     #[arg(value_name = "FILE")]
@@ -359,7 +371,20 @@ struct Cli {
     #[arg(long = "fuseki-batch", value_name = "SIZE", default_value = "1000")]
     fuseki_batch: usize,
 
-    /// Use reasoning engine (otter, prover9, dpll, cdcl, leancop, nanocop, tableau, superposition, smt, dl-tableau, knuth-bendix)
+    /// Use theorem proving engine for formal verification.
+    ///
+    /// Available engines:
+    ///   resolution    - Classical resolution with factoring
+    ///   otter         - Set-of-support strategy (efficient refutation)
+    ///   dpll          - Davis-Putnam-Logemann-Loveland (SAT)
+    ///   cdcl          - Conflict-Driven Clause Learning (large SAT)
+    ///   tableau       - Analytic tableaux (intuitive proofs)
+    ///   leancop       - Lean connection calculus
+    ///   nanocop       - Minimal connection prover
+    ///   superposition - Modern equality prover
+    ///   knuth-bendix  - Term rewriting completion
+    ///   smt           - SMT-style E-matching
+    ///   dl-tableau    - Description Logic (OWL)
     #[arg(long = "engine", value_name = "ENGINE")]
     engine: Option<String>,
 }

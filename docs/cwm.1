@@ -1,0 +1,290 @@
+.TH CWM 1 "December 2024" "cwm-rust 0.1.0" "User Commands"
+.SH NAME
+cwm \- Closed World Machine N3 reasoner and RDF processor
+.SH SYNOPSIS
+.B cwm
+[\fIOPTIONS\fR] [\fIFILE\fR]...
+.SH DESCRIPTION
+.B cwm
+is a high-performance N3 (Notation3) reasoner and RDF processor implemented in Rust.
+It parses N3/Turtle/RDF-XML files, performs forward-chaining inference using N3 rules,
+executes SPARQL queries, and includes 11 integrated theorem proving engines.
+.PP
+cwm-rust is a modern replacement for the original Python-based CWM tool by Tim Berners-Lee,
+providing 10-100x better performance while maintaining full compatibility.
+.SH OPTIONS
+.SS "Input Options"
+.TP
+.B \-\-stdin
+Read input from standard input instead of files.
+.TP
+.BI \-\-data " FILE"
+Load data from FILE without extracting rules.
+.TP
+.BI \-\-rules " FILE"
+Load rules from FILE.
+.TP
+.BI \-\-apply " FILE"
+Apply rules from FILE (implies \-\-think).
+.TP
+.BI \-\-base " URI"
+Set base URI for relative references.
+.SS "Reasoning Options"
+.TP
+.B \-\-think
+Apply forward-chaining inference using N3 rules.
+.TP
+.B \-\-filter
+Output only inferred triples (requires \-\-think).
+.TP
+.BI \-\-filter-rules " FILE"
+Apply rules and output only conclusions.
+.TP
+.BI \-\-max-steps " N"
+Maximum number of inference steps (default: 10000, 0 for unlimited).
+.TP
+.BI \-\-think-passes " N"
+Number of reasoning passes.
+.TP
+.B \-\-why
+Generate proof trace explaining how conclusions were derived.
+.TP
+.BI \-\-engine " ENGINE"
+Use theorem prover. Available engines: resolution, otter, dpll, cdcl,
+tableau, leancop, nanocop, superposition, knuth-bendix, smt, dl-tableau.
+.SS "Output Options"
+.TP
+.BI \-f ", " \-\-format " FORMAT"
+Output format: n3 (default), ntriples, rdf, jsonld, debug.
+.TP
+.BI \-o ", " \-\-output " FILE"
+Write output to FILE instead of stdout.
+.TP
+.B \-\-strings
+Output only literal string values.
+.TP
+.B \-\-purge-rules
+Remove rules (log:implies) from output.
+.TP
+.B \-\-purge-builtins
+Remove builtin predicates from output.
+.TP
+.B \-\-purge
+Remove statements with log:Chaff class.
+.TP
+.B \-\-ugly
+Minimal formatting for fastest output.
+.TP
+.B \-\-bySubject
+Sort output by subject.
+.TP
+.B \-\-no
+Suppress all output.
+.SS "SPARQL Options"
+.TP
+.BI \-\-sparql " FILE"
+Execute SPARQL query from FILE.
+.TP
+.BI \-\-sparql-query " QUERY"
+Execute inline SPARQL query.
+.TP
+.BI \-\-sparql-results " FORMAT"
+SPARQL result format: xml (default), json.
+.TP
+.BI \-\-sparqlServer " PORT"
+Start SPARQL HTTP endpoint on PORT.
+.SS "Fuseki Integration"
+.TP
+.BI \-\-fuseki " URL"
+Use Apache Jena Fuseki SPARQL endpoint as backend store.
+.TP
+.BI \-\-fuseki-graph " URI"
+Named graph URI (default: default graph).
+.TP
+.BI \-\-fuseki-timeout " SECS"
+Connection timeout in seconds (default: 30).
+.TP
+.BI \-\-fuseki-batch " SIZE"
+Batch size for bulk operations (default: 1000).
+.SS "Advanced Options"
+.TP
+.B \-\-reify
+Convert statements to RDF reification.
+.TP
+.B \-\-dereify
+Reverse reification (reconstruct original statements).
+.TP
+.B \-\-flatten
+Flatten formula contents into main graph.
+.TP
+.B \-\-unflatten
+Reconstruct nested formulas from reified statements.
+.TP
+.BI \-\-patch " FILE"
+Apply graph patch file (insertions/deletions).
+.TP
+.BI \-\-closure " FLAGS"
+Auto-import ontologies. Flags: i=imports, r=rules, E=errors.
+.TP
+.B \-\-diff
+Output diff showing additions and deletions.
+.TP
+.B \-\-crypto
+Enable cryptographic operations.
+.TP
+.B \-\-pipe
+Process without storing intermediate results.
+.TP
+.BI \-\-with " ARGS"
+Pass remaining arguments as os:argv values.
+.TP
+.BI \-\-mode " MODE"
+Operating mode flags: r=remote, s=schema, a=auto-rules, E=ignore errors,
+m=merge schemas, u=unique IDs, t=think, f=filter.
+.SS "Output Formatting"
+.TP
+.BI \-\-n3 " FLAGS"
+N3 output flags: a=anon bnodes, c=comments, d=no default ns, e=escape unicode,
+g=no => shorthand, i=store ids, l=no list syntax, n=no numeric, p=no prefix,
+r=no relative URIs, s=explicit subject, t=no special syntax, u=unicode URIs,
+v=verbose quantifiers.
+.TP
+.BI \-\-rdf " FLAGS"
+RDF/XML flags. Output: b=no nodeIDs, c=no class elements, d=no default ns,
+l=no collection, r=no relative, z=allow relative ns.
+Input: S=strict, T=transparent XML, L=local attrs, D=default local, R=no rdf:RDF required.
+.SS "Debugging"
+.TP
+.BR \-v ", " \-\-verbose
+Show reasoning statistics.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress info messages.
+.TP
+.BI \-\-chatty " LEVEL"
+Debug level (0-99, higher = more verbose).
+.SS "Other"
+.TP
+.B \-\-revision
+Output version information.
+.TP
+.BR \-h ", " \-\-help
+Print help message.
+.TP
+.BR \-V ", " \-\-version
+Print version.
+.SH THEOREM PROVERS
+cwm-rust includes 11 integrated theorem proving engines:
+.TP
+.B resolution
+Classical resolution with factoring. General FOL proving.
+.TP
+.B otter
+Set-of-support strategy with subsumption. Efficient refutation proofs.
+.TP
+.B dpll
+Davis-Putnam-Logemann-Loveland algorithm. SAT problems.
+.TP
+.B cdcl
+Conflict-Driven Clause Learning. Large SAT instances.
+.TP
+.B tableau
+Analytic tableaux with alpha/beta rules. Modal logic and intuitive proofs.
+.TP
+.B leancop
+Lean connection calculus. Compact proofs.
+.TP
+.B nanocop
+Minimal connection prover. Small problems.
+.TP
+.B superposition
+Modern equality prover. Equational reasoning.
+.TP
+.B knuth-bendix
+Term rewriting completion. Word problems and algebra.
+.TP
+.B smt
+E-matching for SMT-style reasoning. Theory reasoning.
+.TP
+.B dl-tableau
+Description Logic tableau. OWL ontologies.
+.SH BUILT-IN PREDICATES
+cwm-rust implements 266+ built-in predicates across 8 namespaces:
+.TP
+.B math:
+40+ arithmetic and trigonometric functions (sum, product, sin, cos, etc.)
+.TP
+.B string:
+40+ string manipulation functions (concat, matches, replace, etc.)
+.TP
+.B list:
+25+ list operations (member, append, sort, reverse, etc.)
+.TP
+.B log:
+30+ logical operations (implies, includes, uri, dtlit, etc.)
+.TP
+.B time:
+20+ temporal functions (year, month, day, inSeconds, etc.)
+.TP
+.B crypto:
+15+ cryptographic functions (sha256, md5, base64, hmac, etc.)
+.TP
+.B os:
+10+ system functions (environ, argv, cwd, etc.)
+.TP
+.B graph:
+20+ graph operations (member, length, union, etc.)
+.SH EXAMPLES
+.TP
+Parse and output N3 file:
+.B cwm data.n3
+.TP
+Apply rules with forward-chaining:
+.B cwm data.n3 rules.n3 --think
+.TP
+Show only inferred triples:
+.B cwm data.n3 rules.n3 --think --filter
+.TP
+Execute SPARQL query:
+.B cwm data.n3 --sparql-query "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"
+.TP
+Use theorem prover:
+.B cwm axioms.n3 --engine otter --think
+.TP
+Convert to RDF/XML:
+.B cwm data.n3 --format rdf
+.TP
+Start SPARQL server:
+.B cwm data.n3 --sparqlServer 8000
+.TP
+Use Fuseki backend:
+.B cwm --fuseki http://localhost:3030/dataset --think
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+Error (parse error, file not found, etc.)
+.SH FILES
+.TP
+.I ~/.cwmrc
+User configuration file (if implemented)
+.SH ENVIRONMENT
+.TP
+.B CWM_BASE
+Default base URI for relative references
+.SH SEE ALSO
+.BR eye (1),
+.BR rapper (1),
+.BR arq (1)
+.PP
+W3C CWM: https://www.w3.org/2000/10/swap/doc/cwm.html
+.br
+N3 Specification: https://www.w3.org/TeamSubmission/n3/
+.br
+SPARQL 1.1: https://www.w3.org/TR/sparql11-query/
+.SH AUTHOR
+cwm-rust is based on the original CWM by Tim Berners-Lee and Dan Connolly.
+.SH BUGS
+Report bugs at: https://github.com/your-repo/cwm-rust/issues
