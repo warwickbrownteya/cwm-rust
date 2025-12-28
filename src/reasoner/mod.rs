@@ -12,28 +12,16 @@ use crate::store::Store;
 use crate::builtins::BuiltinRegistry;
 use std::collections::{HashSet, HashMap};
 
-/// A cache key for memoizing pattern matching results
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-struct PatternKey {
-    /// Serialized pattern for hashing
-    pattern_repr: String,
-}
-
-impl PatternKey {
-    fn from_pattern(pattern: &Triple, bindings: &Bindings) -> Self {
-        let substituted = substitute_triple(pattern, bindings);
-        PatternKey {
-            pattern_repr: format!("{:?}", substituted),
-        }
-    }
-}
-
 /// Tabling state for memoization and cycle detection
 #[derive(Clone, Debug, Default)]
 pub struct TablingState {
     /// Patterns currently being computed (for cycle detection)
+    /// Note: Used by backward chaining; forward chaining uses its own mechanism
+    #[allow(dead_code)]
     computing: HashSet<String>,
     /// Cached pattern match results
+    /// Note: Used by backward chaining; forward chaining uses its own mechanism
+    #[allow(dead_code)]
     cache: HashMap<String, Vec<Bindings>>,
     /// Number of cache hits
     pub cache_hits: usize,
@@ -597,7 +585,7 @@ impl Reasoner {
         let mut assigned: HashSet<usize> = HashSet::new();
 
         // First stratum: rules with no dependencies
-        let mut current_stratum: Vec<usize> = (0..self.rules.len())
+        let current_stratum: Vec<usize> = (0..self.rules.len())
             .filter(|&i| dependencies[i].is_empty() && neg_dependencies[i].is_empty())
             .collect();
 

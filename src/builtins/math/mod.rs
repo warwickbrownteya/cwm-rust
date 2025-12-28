@@ -82,7 +82,7 @@ impl BuiltinNamespace for MathNamespace {
 mod tests {
     use super::*;
     use crate::term::{Term, Bindings};
-    use crate::core::{EvalResult, BuiltinPredicate};
+    use crate::core::BuiltinPredicate;
 
     #[test]
     fn test_sum_forward() {
