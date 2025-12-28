@@ -51,6 +51,8 @@ pub struct ParserState {
     prefixes: IndexMap<String, String>,
     /// Base URI for relative resolution
     base: Option<Uri>,
+    /// Active keywords from @keywords directive (None = all N3 keywords active)
+    keywords: Option<Vec<String>>,
 }
 
 impl ParserState {
@@ -96,6 +98,27 @@ impl ParserState {
 
     pub fn prefixes(&self) -> &IndexMap<String, String> {
         &self.prefixes
+    }
+
+    /// Set active keywords from @keywords directive
+    pub fn set_keywords(&mut self, keywords: Vec<String>) {
+        self.keywords = Some(keywords);
+    }
+
+    /// Check if a bare word is an active keyword
+    pub fn is_keyword(&self, word: &str) -> bool {
+        match &self.keywords {
+            None => {
+                // Default: all N3 keywords are active
+                matches!(word, "a" | "is" | "of" | "true" | "false" | "has" | "this")
+            }
+            Some(keywords) => keywords.iter().any(|k| k == word),
+        }
+    }
+
+    /// Check if keywords mode is active (i.e., bare words allowed)
+    pub fn keywords_mode(&self) -> bool {
+        self.keywords.is_some()
     }
 }
 
@@ -370,6 +393,8 @@ impl N3Parser {
             self.parse_forall_directive(input)
         } else if input.starts_with("@forSome") {
             self.parse_forsome_directive(input)
+        } else if input.starts_with("@keywords") {
+            self.parse_keywords_directive(input)
         } else {
             Err(ParseError::Syntax {
                 position: 0,
@@ -477,6 +502,46 @@ impl N3Parser {
             }
 
             let (input, _) = ws(remaining).map_err(|_| ParseError::UnexpectedEof)?;
+
+            // Check for comma or period
+            if let Ok((rest, _)) = char::<&str, nom::error::Error<&str>>(',')(input) {
+                remaining = rest;
+            } else {
+                remaining = input;
+            }
+        }
+    }
+
+    /// Parse @keywords directive
+    /// Syntax: @keywords is, of, a.
+    /// This enables "keywords mode" where bare words are allowed and only
+    /// the listed keywords are recognized as N3 keywords
+    fn parse_keywords_directive<'a>(&mut self, input: &'a str) -> Result<&'a str, ParseError> {
+        let input = &input[9..]; // Skip "@keywords"
+        let (input, _) = ws(input).map_err(|_| ParseError::UnexpectedEof)?;
+
+        let mut keywords = Vec::new();
+        let mut remaining = input;
+
+        loop {
+            let (input, _) = ws(remaining).map_err(|_| ParseError::UnexpectedEof)?;
+
+            // Check for period (end of directive)
+            if let Ok((rest, _)) = char::<&str, nom::error::Error<&str>>('.')(input) {
+                self.state.set_keywords(keywords);
+                return Ok(rest);
+            }
+
+            // Parse a bare word (keyword name)
+            let (rest, word) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)
+                .map_err(|_: nom::Err<nom::error::Error<&str>>| ParseError::Syntax {
+                    position: 0,
+                    message: "Expected keyword name in @keywords".to_string(),
+                })?;
+
+            keywords.push(word.to_string());
+
+            let (input, _) = ws(rest).map_err(|_| ParseError::UnexpectedEof)?;
 
             // Check for comma or period
             if let Ok((rest, _)) = char::<&str, nom::error::Error<&str>>(',')(input) {
@@ -595,7 +660,7 @@ impl N3Parser {
         Ok(remaining)
     }
 
-    /// Parse a predicate (including 'a' shorthand and '=>')
+    /// Parse a predicate (including 'a' shorthand, '=>', 'has', 'is...of')
     fn parse_predicate<'a>(&mut self, input: &'a str) -> Result<(&'a str, Term), ParseError> {
         // Check for 'a' (rdf:type)
         if let Ok((rest, _)) = rdf_type_shorthand(input) {
@@ -617,11 +682,31 @@ impl N3Parser {
             return Ok((&input[1..], Term::uri("http://www.w3.org/2002/07/owl#sameAs")));
         }
 
+        // Check for 'has' keyword (syntactic sugar, just skip it)
+        // "alice has parent bob" = "alice parent bob"
+        if self.state.is_keyword("has") && input.starts_with("has") {
+            let after = &input[3..];
+            if after.starts_with(|c: char| c.is_whitespace()) {
+                let (rest, _) = ws(after).map_err(|_| ParseError::UnexpectedEof)?;
+                // Parse the actual predicate after 'has'
+                return self.parse_term(rest);
+            }
+        }
+
         self.parse_term(input)
     }
 
     /// Parse a term (subject, predicate, or object)
     fn parse_term<'a>(&mut self, input: &'a str) -> Result<(&'a str, Term), ParseError> {
+        // Parse the base term first
+        let (remaining, base_term) = self.parse_base_term(input)?;
+
+        // Check for path operators (! or ^)
+        self.parse_path_expression(remaining, base_term)
+    }
+
+    /// Parse a base term without path operators
+    fn parse_base_term<'a>(&mut self, input: &'a str) -> Result<(&'a str, Term), ParseError> {
         // Try formula { ... }
         if input.starts_with('{') {
             return self.parse_formula(input);
@@ -678,10 +763,98 @@ impl N3Parser {
             }
         }
 
+        // In keywords mode, try to parse bare words as URIs
+        if self.state.keywords_mode() {
+            // A bare word starts with a letter or underscore
+            if input.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+                let (rest, word) = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-')(input)
+                    .map_err(|_: nom::Err<nom::error::Error<&str>>| ParseError::Syntax {
+                        position: 0,
+                        message: "Expected bare word".to_string(),
+                    })?;
+
+                // Check if it's an active keyword
+                if self.state.is_keyword(word) {
+                    match word {
+                        "a" => return Ok((rest, Term::uri(ns::rdf_type().as_str()))),
+                        "true" => return Ok((rest, Term::Literal(Arc::new(Literal::typed(
+                            "true".to_string(),
+                            "http://www.w3.org/2001/XMLSchema#boolean".to_string(),
+                        ))))),
+                        "false" => return Ok((rest, Term::Literal(Arc::new(Literal::typed(
+                            "false".to_string(),
+                            "http://www.w3.org/2001/XMLSchema#boolean".to_string(),
+                        ))))),
+                        "this" => {
+                            // "this" refers to the current formula/document
+                            return Ok((rest, Term::uri("#_this")));
+                        }
+                        // "is" and "of" are handled in parse_predicate
+                        _ => {}
+                    }
+                }
+
+                // Not a keyword, treat as a local name in the default namespace
+                // Resolve against base URI or use as fragment
+                let uri = if let Some(base) = &self.state.base {
+                    base.resolve(&format!("#{}", word))
+                } else {
+                    Uri::new(format!("#{}", word))
+                };
+                return Ok((rest, Term::Uri(Arc::new(uri))));
+            }
+        }
+
         Err(ParseError::Syntax {
             position: 0,
             message: format!("Cannot parse term starting with: {}", &input[..input.len().min(20)]),
         })
+    }
+
+    /// Parse path expression operators (! for forward, ^ for backward)
+    /// N3 path syntax:
+    /// - subject!predicate = the object of (subject predicate ?x), returns ?x
+    /// - subject^predicate = the subject of (?x predicate subject), returns ?x
+    /// Paths can be chained: alice!knows!age
+    fn parse_path_expression<'a>(&mut self, input: &'a str, current_term: Term) -> Result<(&'a str, Term), ParseError> {
+        let mut remaining = input;
+        let mut result_term = current_term;
+
+        loop {
+            // Check for path operator
+            if remaining.starts_with('!') {
+                // Forward path: subject!predicate means "the object of (subject predicate ?x)"
+                remaining = &remaining[1..];
+                let (rest, predicate) = self.parse_base_term(remaining)?;
+
+                // Create a blank node to represent the path result
+                let path_result = Term::BlankNode(BlankNode::fresh());
+
+                // Add triple: result_term predicate path_result
+                self.triples.push(Triple::new(result_term.clone(), predicate, path_result.clone()));
+
+                result_term = path_result;
+                remaining = rest;
+            } else if remaining.starts_with('^') {
+                // Backward path: subject^predicate means "the subject of (?x predicate subject)"
+                remaining = &remaining[1..];
+                let (rest, predicate) = self.parse_base_term(remaining)?;
+
+                // Create a blank node to represent the path result
+                let path_result = Term::BlankNode(BlankNode::fresh());
+
+                // Add triple: path_result predicate result_term (reversed!)
+                self.triples.push(Triple::new(path_result.clone(), predicate, result_term.clone()));
+
+                result_term = path_result;
+                remaining = rest;
+            } else {
+                // No more path operators
+                break;
+            }
+        }
+
+        Ok((remaining, result_term))
     }
 
     /// Parse a formula { ... }
@@ -1191,5 +1364,129 @@ mod tests {
 
         let result = parse(input).unwrap();
         assert_eq!(result.rules.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_keywords_directive() {
+        // With @keywords, bare words become URIs in the default namespace
+        let input = r#"
+            @base <http://example.org/> .
+            @keywords a.
+            alice a Person .
+        "#;
+
+        let result = parse(input).unwrap();
+        assert_eq!(result.triples.len(), 1);
+
+        let triple = &result.triples[0];
+        // 'alice' and 'Person' should be resolved as URIs
+        assert!(format!("{}", triple.subject).contains("alice"));
+        assert!(format!("{}", triple.object).contains("Person"));
+        // 'a' should be rdf:type
+        assert_eq!(format!("{}", triple.predicate),
+                   "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>");
+    }
+
+    #[test]
+    fn test_parse_keywords_empty() {
+        // @keywords with no keywords - all bare words become URIs
+        let input = r#"
+            @base <http://example.org/> .
+            @keywords .
+            alice knows bob .
+        "#;
+
+        let result = parse(input).unwrap();
+        assert_eq!(result.triples.len(), 1);
+
+        let triple = &result.triples[0];
+        // All bare words should be resolved as URIs
+        assert!(format!("{}", triple.subject).contains("alice"));
+        assert!(format!("{}", triple.predicate).contains("knows"));
+        assert!(format!("{}", triple.object).contains("bob"));
+    }
+
+    #[test]
+    fn test_parse_keywords_multiple() {
+        let input = r#"
+            @base <http://example.org/> .
+            @keywords a, has.
+            alice a Person .
+        "#;
+
+        let result = parse(input).unwrap();
+        assert_eq!(result.triples.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_has_keyword() {
+        let input = r#"
+            @base <http://example.org/> .
+            @keywords has.
+            alice has parent bob .
+        "#;
+
+        let result = parse(input).unwrap();
+        assert_eq!(result.triples.len(), 1);
+
+        let triple = &result.triples[0];
+        // 'has' is syntactic sugar - the actual predicate is 'parent'
+        assert!(format!("{}", triple.predicate).contains("parent"));
+    }
+
+    #[test]
+    fn test_parse_forward_path() {
+        // Forward path: alice!knows means "the object where alice knows ?x"
+        let input = r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice!ex:knows ex:name "Alice's friend" .
+        "#;
+
+        let result = parse(input).unwrap();
+        // Should create 2 triples:
+        // 1. ex:alice ex:knows _:b1
+        // 2. _:b1 ex:name "Alice's friend"
+        assert_eq!(result.triples.len(), 2);
+
+        // Check that the first triple is the path expansion
+        let first = &result.triples[0];
+        assert!(format!("{}", first.subject).contains("alice"));
+        assert!(format!("{}", first.predicate).contains("knows"));
+    }
+
+    #[test]
+    fn test_parse_backward_path() {
+        // Backward path: bob^knows means "the subject where ?x knows bob"
+        let input = r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob^ex:knows ex:name "Someone who knows Bob" .
+        "#;
+
+        let result = parse(input).unwrap();
+        // Should create 2 triples:
+        // 1. _:b1 ex:knows ex:bob
+        // 2. _:b1 ex:name "Someone who knows Bob"
+        assert_eq!(result.triples.len(), 2);
+
+        // Check that the first triple is the path expansion (reversed)
+        let first = &result.triples[0];
+        assert!(format!("{}", first.object).contains("bob"));
+        assert!(format!("{}", first.predicate).contains("knows"));
+    }
+
+    #[test]
+    fn test_parse_chained_path() {
+        // Chained path: alice!knows!age means traverse two relationships
+        let input = r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice!ex:knows!ex:age ex:unit "years" .
+        "#;
+
+        let result = parse(input).unwrap();
+        // Should create 3 triples:
+        // 1. ex:alice ex:knows _:b1
+        // 2. _:b1 ex:age _:b2
+        // 3. _:b2 ex:unit "years"
+        assert_eq!(result.triples.len(), 3);
     }
 }
