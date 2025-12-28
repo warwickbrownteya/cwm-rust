@@ -63,6 +63,7 @@ pub mod builtins;
 pub mod sparql;
 pub mod fuseki;
 pub mod prover;
+pub mod server;
 
 // Re-export core traits and types
 pub use crate::core::{
@@ -93,3 +94,6 @@ pub use sparql::{execute_sparql, QueryResult, format_results_xml, format_results
 
 // Re-export reasoning strategies
 pub use reasoning::{ReasoningStrategy, StrategyConfig, InferenceStats, ForwardChaining, BackwardChaining};
+
+// Re-export async server types
+pub use server::{ServerConfig, AppState, run_server, create_router};

@@ -15,6 +15,7 @@ use cwm::{Store, Reasoner, ReasonerConfig, parse, parse_rdfxml, ParseResult, Ter
 use cwm::term::Variable;
 use cwm::fuseki::FusekiStoreBuilder;
 use cwm::core::TripleStore;
+use cwm::server::{ServerConfig, run_server};
 
 /// N3 output formatting options
 #[derive(Default, Clone)]
@@ -1707,10 +1708,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Start SPARQL server if requested
+    // Start SPARQL server if requested (async with tokio)
     if let Some(port) = cli.sparql_server {
         let port = if port == 0 { 8000 } else { port };
-        return run_sparql_server(&output_store, &all_prefixes, port);
+
+        // Create async runtime and run the server
+        let runtime = tokio::runtime::Runtime::new()
+            .context("Failed to create tokio runtime")?;
+
+        let config = ServerConfig::new(port);
+        runtime.block_on(async {
+            run_server(output_store.clone(), config).await
+        }).map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+
+        return Ok(());
     }
 
     // Suppress output if --no flag is set
@@ -3529,150 +3540,6 @@ fn escape_uri_unicode(s: &str) -> String {
     }
     result
 }
-
-/// Run a SPARQL HTTP endpoint server
-fn run_sparql_server(store: &Store, _prefixes: &IndexMap<String, String>, port: u16) -> Result<()> {
-    use tiny_http::{Server, Response, Header};
-
-    let addr = format!("0.0.0.0:{}", port);
-    let server = Server::http(&addr)
-        .map_err(|e| anyhow::anyhow!("Failed to start server: {}", e))?;
-
-    eprintln!("SPARQL server listening on http://localhost:{}/sparql", port);
-    eprintln!("Press Ctrl+C to stop");
-
-    // Clone data for the server loop
-    let store_copy = store.clone();
-
-    for mut request in server.incoming_requests() {
-        let url = request.url().to_string();
-        let method = request.method().to_string();
-
-        // Handle SPARQL endpoint
-        if url.starts_with("/sparql") {
-            let query = if method == "GET" {
-                // Parse query from URL parameters
-                if let Some(pos) = url.find("?query=") {
-                    let query_part = &url[pos + 7..];
-                    // URL decode the query
-                    percent_decode_str(query_part)
-                        .decode_utf8()
-                        .map(|s| s.into_owned())
-                        .ok()
-                } else {
-                    None
-                }
-            } else if method == "POST" {
-                // Read query from body
-                let mut content = String::new();
-                {
-                    use std::io::Read;
-                    let reader = request.as_reader();
-                    let _ = reader.take(1024 * 1024).read_to_string(&mut content);
-                }
-
-                // Check content type
-                let content_type: String = request.headers()
-                    .iter()
-                    .find(|h| h.field.to_string().to_lowercase() == "content-type")
-                    .map(|h| h.value.to_string())
-                    .unwrap_or_default();
-
-                if content_type.contains("application/sparql-query") {
-                    Some(content)
-                } else if content_type.contains("application/x-www-form-urlencoded") {
-                    // Parse form data
-                    if let Some(pos) = content.find("query=") {
-                        let query_part = &content[pos + 6..];
-                        let end = query_part.find('&').unwrap_or(query_part.len());
-                        percent_decode_str(&query_part[..end])
-                            .decode_utf8()
-                            .map(|s| s.into_owned())
-                            .ok()
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(content)
-                }
-            } else {
-                None
-            };
-
-            if let Some(query_str) = query {
-                match execute_sparql(&store_copy, &query_str) {
-                    Ok(result) => {
-                        // Check Accept header for format
-                        let accept: String = request.headers()
-                            .iter()
-                            .find(|h| h.field.to_string().to_lowercase() == "accept")
-                            .map(|h| h.value.to_string())
-                            .unwrap_or_else(|| "application/sparql-results+xml".to_string());
-
-                        let (content_type, body) = if accept.contains("json") {
-                            ("application/sparql-results+json", format_results_json(&result))
-                        } else {
-                            ("application/sparql-results+xml", format_results_xml(&result))
-                        };
-
-                        let response = Response::from_string(body)
-                            .with_header(Header::from_bytes(
-                                &b"Content-Type"[..],
-                                content_type.as_bytes()
-                            ).unwrap())
-                            .with_header(Header::from_bytes(
-                                &b"Access-Control-Allow-Origin"[..],
-                                &b"*"[..]
-                            ).unwrap());
-
-                        let _ = request.respond(response);
-                    }
-                    Err(e) => {
-                        let response = Response::from_string(format!("SPARQL Error: {}", e))
-                            .with_status_code(400);
-                        let _ = request.respond(response);
-                    }
-                }
-            } else {
-                let response = Response::from_string("Missing query parameter")
-                    .with_status_code(400);
-                let _ = request.respond(response);
-            }
-        } else if url == "/" || url == "/index.html" {
-            // Serve a simple HTML form for testing
-            let html = r#"<!DOCTYPE html>
-<html>
-<head><title>CWM SPARQL Endpoint</title></head>
-<body>
-<h1>CWM SPARQL Endpoint</h1>
-<form action="/sparql" method="POST">
-<textarea name="query" rows="10" cols="60">
-SELECT ?s ?p ?o
-WHERE { ?s ?p ?o }
-LIMIT 10
-</textarea>
-<br>
-<button type="submit">Execute Query</button>
-</form>
-</body>
-</html>"#;
-            let response = Response::from_string(html)
-                .with_header(Header::from_bytes(
-                    &b"Content-Type"[..],
-                    &b"text/html"[..]
-                ).unwrap());
-            let _ = request.respond(response);
-        } else {
-            let response = Response::from_string("Not Found")
-                .with_status_code(404);
-            let _ = request.respond(response);
-        }
-    }
-
-    Ok(())
-}
-
-use percent_encoding::percent_decode_str;
 
 /// Execute N3QL query (N3 pattern matching)
 ///
