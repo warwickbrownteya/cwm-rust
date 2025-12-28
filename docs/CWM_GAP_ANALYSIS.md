@@ -578,20 +578,89 @@ These were in the original gap analysis but are now confirmed implemented:
 
 4. **Otter engine integration** - Specialized use case for first-order logic proving
 
+## Remaining Gaps (December 2025 Update)
+
+### CLI Options
+
+| Gap | Priority | Description |
+|-----|----------|-------------|
+| `--filter=FILE` | Medium | Original CWM: apply rules and REPLACE store (vs `--apply` which ADDS). cwm-rust `--filter` is just a flag for inferred-only output |
+| `--languageOptions=Y` | Low | Language-specific parser/serializer options |
+
+### Mode Flags (--mode=)
+
+These affect inference extending to the web:
+
+| Flag | Status | Description |
+|------|--------|-------------|
+| `r` | ❌ GAP | Enable remote operations |
+| `a` | ❌ GAP | Auto-load rules from schema (requires r, s) |
+| `E` | ❌ GAP | Errors loading schemas ignored |
+| `m` | ❌ GAP | Merge schemas into meta knowledge |
+| `s` | ❌ GAP | Read schema for any predicate in query |
+| `u` | ❌ GAP | Generate unique IDs using run-specific identifier |
+
+### N3 Output Flags (--n3=)
+
+| Flag | Status | Description |
+|------|--------|-------------|
+| `a` | ✅ | Anonymous nodes using _: convention |
+| `c` | ❌ GAP | Comments at top about version/base URI |
+| `d` | ✅ | Don't use default namespace |
+| `e` | ✅ | Escape literals with \u notation |
+| `g` | ❌ GAP | Suppress => shorthand for log:implies |
+| `i` | ✅ | Use identifiers from store |
+| `l` | ✅ | Suppress list syntax (..) |
+| `n` | ✅ | No numeric syntax |
+| `p` | ✅ | No prefix - always use URIs in <> |
+| `r` | ✅ | No relative URIs |
+| `s` | ✅ | Explicit subject for every statement |
+| `t` | ✅ | No special syntax (= and ()) |
+| `u` | ❌ GAP | Use \u for unicode in URIs (vs utf-8 %XX) |
+| `v` | ❌ GAP | Use "this log:forAll" for @forAll/@forSome |
+
+### N3 Input Flags
+
+| Flag | Status | Description |
+|------|--------|-------------|
+| `B` | ❌ GAP | Turn blank nodes into existentially qualified named nodes |
+
+### Backend Integrations
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Otter engine | ❌ GAP | `--engine=otter` for theorem proving |
+| SQL database | ❌ GAP | dbview.py style RDF export from SQL |
+| Native RDF/XML parser | ❌ GAP | Currently delegates to web fetch |
+
+### Fuseki Integration
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Basic SPARQL | ✅ | Query, Update, ASK operations |
+| Named graphs | ✅ | --fuseki-graph support |
+| Batch operations | ✅ | Configurable batch size |
+| Connection pooling | ✅ | HTTP agent reuse |
+
 ## Conclusion
 
-cwm-rust now achieves **100% functional parity** with the original W3C CWM and significantly exceeds it in built-in predicate coverage (+165 predicates) and SPARQL support (full SPARQL 1.1 including property paths, aggregates, subqueries, VALUES, MINUS, GRAPH, and variable SERVICE endpoints).
+cwm-rust achieves **~95% functional parity** with the original W3C CWM and significantly exceeds it in built-in predicate coverage (+165 predicates) and SPARQL support (full SPARQL 1.1).
 
-**All Major Gaps Now Resolved:**
+**Core Features Complete:**
 - ✅ Complete N3 syntax support (path syntax `!` and `^`, `@keywords`, `@default`)
 - ✅ All closure flags (i, r, e, s, p, o, t, n, T, E)
 - ✅ Full SPARQL 1.1 (VALUES, MINUS, GRAPH, variable SERVICE)
-- ✅ All introspection predicates (`log:builtinIn`, `log:ifThenElseIn`, `log:bulkIn`, `log:getList`, `log:forAllInClosure`)
-- ✅ Random number generation (`math:randomInteger`, `math:random`)
-- ✅ Secure file I/O (`os:readFile`, `os:writeFile`, `os:deleteFile`, etc.)
-- ✅ Content-type based parser selection
-- ✅ All time parsing predicates
-- ✅ All crypto predicates with proper `--crypto` enforcement
+- ✅ All introspection predicates
+- ✅ Secure file I/O
+- ✅ Apache Jena Fuseki backend integration
+
+**Remaining Gaps (Low Priority):**
+- Mode flags for web-based schema loading (r, a, E, m, s, u)
+- N3 output flags (c, g, u, v)
+- N3 input flag (B)
+- `--filter=FILE` semantics (replace vs add)
+- Otter theorem prover engine
+- SQL database access
 
 **N3QL Support:**
 - ✅ `--query` flag for N3QL pattern matching queries
@@ -599,4 +668,4 @@ cwm-rust now achieves **100% functional parity** with the original W3C CWM and s
 - ✅ Pattern matching with variables
 - ✅ Scoped Negation As Failure (SNAF) via `log:notIncludes`
 
-**As of December 2025, cwm-rust has no remaining functional gaps compared to the original CWM.** The only remaining work is performance optimization (indexed triple store) and optional engine integrations.
+**As of December 2025, cwm-rust covers all commonly-used CWM features.** The remaining gaps are specialized features (web schema loading, alternate engines) that are rarely used in practice.
