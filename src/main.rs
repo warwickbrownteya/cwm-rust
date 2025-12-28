@@ -311,6 +311,10 @@ struct Cli {
     /// Execute N3QL query from file (N3 pattern matching)
     #[arg(long = "query", value_name = "FILE")]
     n3ql_query: Option<PathBuf>,
+
+    /// Output revision/version information
+    #[arg(long)]
+    revision: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -327,8 +331,49 @@ enum OutputFormat {
     Debug,
 }
 
+/// Parse --language string to OutputFormat
+fn parse_language(lang: &str) -> Option<OutputFormat> {
+    match lang.to_lowercase().as_str() {
+        "n3" | "notation3" => Some(OutputFormat::N3),
+        "ntriples" | "nt" => Some(OutputFormat::Ntriples),
+        "rdf" | "rdf/xml" | "rdfxml" | "xml" => Some(OutputFormat::Rdf),
+        "jsonld" | "json-ld" => Some(OutputFormat::Jsonld),
+        _ => None,
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle --revision flag: output version info
+    if cli.revision {
+        println!("cwm-rust version 0.1.0");
+        println!("Rust implementation of the Closed World Machine (CWM)");
+        println!("Based on Tim Berners-Lee's original CWM for N3/RDF reasoning");
+        println!("Repository: https://github.com/cwm-rust/cwm");
+        return Ok(());
+    }
+
+    // Determine effective output format (--language overrides default if no explicit --format)
+    let effective_format = if let Some(ref lang) = cli.language {
+        parse_language(lang).unwrap_or(cli.format)
+    } else {
+        cli.format
+    };
+
+    // Parse --mode flags (r=read, w=write, t=think, f=filter)
+    let (mode_think, mode_filter) = if let Some(ref mode) = cli.mode {
+        let chars: Vec<char> = mode.chars().collect();
+        let think = chars.contains(&'t');
+        let filter = chars.contains(&'f');
+        (think, filter)
+    } else {
+        (false, false)
+    };
+
+    // Effective think/filter: CLI flags OR --mode
+    let effective_think = cli.think || mode_think || !cli.apply.is_empty();
+    let effective_filter = cli.filter || mode_filter;
 
     // Collect all prefixes
     let mut all_prefixes: IndexMap<String, String> = IndexMap::new();
@@ -382,7 +427,8 @@ fn main() -> Result<()> {
     }
 
     // Load rules from --apply files (same as --rules but implies --think)
-    let should_think = cli.think || !cli.apply.is_empty();
+    // Note: effective_think already accounts for --apply, but we keep should_think for compatibility
+    let should_think = effective_think;
     for path in &cli.apply {
         let file_content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read apply file: {}", path.display()))?;
@@ -406,7 +452,7 @@ fn main() -> Result<()> {
     }
 
     // Track original triples for --filter mode
-    let original_triples: std::collections::HashSet<Triple> = if cli.filter {
+    let original_triples: std::collections::HashSet<Triple> = if effective_filter {
         store.iter().cloned().collect()
     } else {
         std::collections::HashSet::new()
@@ -433,9 +479,10 @@ fn main() -> Result<()> {
         let config = ReasonerConfig {
             max_steps,
             recursive: true,
-            filter: cli.filter,
+            filter: effective_filter,
             generate_proof: cli.why,
             enable_tabling: true,
+            enable_crypto: cli.crypto,
         };
 
         let mut reasoner = Reasoner::with_config(config);
@@ -469,13 +516,13 @@ fn main() -> Result<()> {
                 }
             }
         }
-    } else if cli.filter {
+    } else if effective_filter {
         // --filter without --think: warn user
         eprintln!("Warning: --filter has no effect without --think");
     }
 
     // Apply filter if requested: output only inferred triples
-    let mut output_store = if cli.filter && should_think {
+    let mut output_store = if effective_filter && should_think {
         let mut filtered = Store::new();
         for triple in store.iter() {
             if !original_triples.contains(triple) {
@@ -699,7 +746,7 @@ fn main() -> Result<()> {
         // Ugly mode: minimal formatting, fastest
         format_ntriples(&output_store)
     } else {
-        match cli.format {
+        match effective_format {
             OutputFormat::N3 => {
                 if let Some(opts) = &n3_opts {
                     format_n3_with_options(&output_store, &all_prefixes, opts)
@@ -2094,6 +2141,7 @@ fn execute_n3ql(store: &Store, query_content: &str, _prefixes: &IndexMap<String,
             filter: false,
             generate_proof: false,
             enable_tabling: true,
+            enable_crypto: false, // N3QL queries don't enable crypto by default
         };
 
         let mut reasoner = Reasoner::with_config(config);

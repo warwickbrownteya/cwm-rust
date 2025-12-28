@@ -122,6 +122,8 @@ pub struct ReasonerConfig {
     pub generate_proof: bool,
     /// Whether to enable tabling/memoization for cycle detection
     pub enable_tabling: bool,
+    /// Whether to enable crypto builtins (requires --crypto flag)
+    pub enable_crypto: bool,
 }
 
 impl Default for ReasonerConfig {
@@ -132,6 +134,7 @@ impl Default for ReasonerConfig {
             filter: false,
             generate_proof: false,
             enable_tabling: true, // Enable by default for safety
+            enable_crypto: false, // Disabled by default, requires --crypto flag
         }
     }
 }
@@ -180,9 +183,10 @@ impl Reasoner {
     /// Create a reasoner with custom configuration
     pub fn with_config(config: ReasonerConfig) -> Self {
         let generate_proof = config.generate_proof;
+        let enable_crypto = config.enable_crypto;
         Reasoner {
             config,
-            builtins: BuiltinRegistry::new(),
+            builtins: BuiltinRegistry::with_options(enable_crypto),
             rules: Vec::new(),
             stats: ReasonerStats::default(),
             proof: if generate_proof { Some(Proof::default()) } else { None },
@@ -758,12 +762,19 @@ impl ReasonerBuilder {
         self
     }
 
+    /// Enable or disable crypto builtins
+    pub fn with_crypto(mut self, enabled: bool) -> Self {
+        self.config.enable_crypto = enabled;
+        self
+    }
+
     /// Build the reasoner with all configured options
     pub fn build(self) -> Reasoner {
         let generate_proof = self.config.generate_proof;
+        let enable_crypto = self.config.enable_crypto;
         Reasoner {
             config: self.config,
-            builtins: self.custom_builtins.unwrap_or_else(BuiltinRegistry::new),
+            builtins: self.custom_builtins.unwrap_or_else(|| BuiltinRegistry::with_options(enable_crypto)),
             rules: self.rules,
             stats: ReasonerStats::default(),
             proof: if generate_proof { Some(Proof::default()) } else { None },

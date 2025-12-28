@@ -140,8 +140,16 @@ impl std::fmt::Debug for BuiltinRegistry {
 }
 
 impl BuiltinRegistry {
-    /// Create a new registry with standard built-ins
+    /// Create a new registry with standard built-ins (including crypto)
     pub fn new() -> Self {
+        Self::with_options(true)
+    }
+
+    /// Create a new registry with configurable options
+    ///
+    /// # Arguments
+    /// * `enable_crypto` - Whether to register crypto builtins (requires --crypto flag)
+    pub fn with_options(enable_crypto: bool) -> Self {
         let mut registry = BuiltinRegistry {
             builtins: HashMap::new(),
         };
@@ -156,8 +164,10 @@ impl BuiltinRegistry {
         registry.register_list();
         // Register time built-ins
         registry.register_time();
-        // Register crypto built-ins
-        registry.register_crypto();
+        // Register crypto built-ins (only if enabled)
+        if enable_crypto {
+            registry.register_crypto();
+        }
         // Register os built-ins
         registry.register_os();
         // Register graph built-ins
@@ -4284,6 +4294,45 @@ impl BuiltinRegistry {
                 }
                 let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                 return match_or_bind_string(object, hex, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // crypto:publicKey - keypair crypto:publicKey publicKey
+        // Extracts the public key from a keypair.
+        // Keypair can be a list [privateKey, publicKey] or a private key string
+        // from which the public key is derived.
+        self.register(&format!("{}publicKey", ns::CRYPTO), |subject, object, bindings| {
+            match subject {
+                // If keypair is a list [private, public], return the public key
+                Term::List(list) => {
+                    let items = list.to_vec();
+                    if items.len() == 2 {
+                        let public_key = items[1].clone();
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), public_key);
+                            return BuiltinResult::Success(new_bindings);
+                        } else if public_key == *object {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+                // If it's a string (private key), derive public key via hash
+                Term::Literal(_) => {
+                    if let Some(private_key) = get_string(subject) {
+                        // Derive public key by hashing the private key
+                        // This is a simplified model - real asymmetric crypto would use
+                        // proper key derivation (e.g., Ed25519, ECDSA P-256)
+                        let mut hasher = Sha256::new();
+                        hasher.update(b"public_key_derivation:");
+                        hasher.update(private_key.as_bytes());
+                        let result = hasher.finalize();
+                        let public_key = format!("{:x}", result);
+                        return match_or_bind_string(object, public_key, bindings);
+                    }
+                }
+                _ => {}
             }
             BuiltinResult::NotReady
         });
