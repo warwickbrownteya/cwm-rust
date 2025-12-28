@@ -241,10 +241,6 @@ impl FusekiStore {
             return Ok(());
         }
 
-        let graph_clause = self.config.default_graph.as_ref()
-            .map(|g| format!("GRAPH <{}> ", g))
-            .unwrap_or_default();
-
         let mut data = String::new();
         for triple in triples {
             data.push_str(&format!("{} {} {} .\n",
@@ -254,7 +250,11 @@ impl FusekiStore {
             ));
         }
 
-        let update = format!("INSERT DATA {{ {}{{\n{}}}\n}}", graph_clause, data);
+        let update = if let Some(ref graph) = self.config.default_graph {
+            format!("INSERT DATA {{ GRAPH <{}> {{\n{}}}\n}}", graph, data)
+        } else {
+            format!("INSERT DATA {{\n{}}}", data)
+        };
         self.update(&update)
     }
 
@@ -264,10 +264,6 @@ impl FusekiStore {
             return Ok(());
         }
 
-        let graph_clause = self.config.default_graph.as_ref()
-            .map(|g| format!("GRAPH <{}> ", g))
-            .unwrap_or_default();
-
         let mut data = String::new();
         for triple in triples {
             data.push_str(&format!("{} {} {} .\n",
@@ -277,7 +273,11 @@ impl FusekiStore {
             ));
         }
 
-        let update = format!("DELETE DATA {{ {}{{\n{}}}\n}}", graph_clause, data);
+        let update = if let Some(ref graph) = self.config.default_graph {
+            format!("DELETE DATA {{ GRAPH <{}> {{\n{}}}\n}}", graph, data)
+        } else {
+            format!("DELETE DATA {{\n{}}}", data)
+        };
         self.update(&update)
     }
 
@@ -425,8 +425,9 @@ impl FusekiStore {
 
     /// Clear all triples from the graph
     pub fn clear_graph(&self) -> Result<(), String> {
+        // Use DROP SILENT which doesn't fail if graph doesn't exist
         let update = if let Some(graph) = &self.config.default_graph {
-            format!("CLEAR GRAPH <{}>", graph)
+            format!("DROP SILENT GRAPH <{}>; CREATE SILENT GRAPH <{}>", graph, graph)
         } else {
             "CLEAR DEFAULT".to_string()
         };
