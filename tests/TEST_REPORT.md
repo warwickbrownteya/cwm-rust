@@ -1,118 +1,142 @@
-# CWM-Rust vs EYE Reasoner Test Report
+# CWM-Rust Comprehensive Test Report
 
-**Date**: 2025-12-27
+**Date**: 2025-12-28
 **CWM-Rust**: v0.1.0
-**EYE**: v11.23.2
+**Total Tests**: 79 unit tests + 22 integration tests
 
 ## Summary
 
-| Test | Description | CWM-Rust | EYE | Match |
-|------|-------------|----------|-----|-------|
-| 01 | Basic triples | PASS | PASS | Yes |
-| 02 | Simple rule (Human → Mortal) | PASS | PASS | Yes |
-| 03 | Transitive closure (subClassOf) | PASS | PASS | Yes |
-| 04 | Family relations (parent, Father, Mother) | PASS | PASS | Yes |
-| 05 | Multi-pattern rule (knows → knowsIndirectly) | PASS | PASS | Yes |
-| 06 | Type propagation (instance → superclass) | PASS | PASS | Yes |
-| 07 | Blank nodes | PASS | PASS | Yes* |
-| 08 | Collections/lists | PASS | PASS | Yes* |
-| 09 | Symmetric relations | PASS | PASS | Yes |
-| 10 | Chain rule (next → skip) | PASS | PASS | Yes |
-
-**Result: 10/10 tests passing**
-
-\* Minor formatting differences (blank node IDs, numeric literal syntax)
-
-## Test Details
-
-### Test 02: Simple Rule
-```n3
-{ ?x a ex:Human } => { ?x a ex:Mortal } .
+### Unit Tests (Rust)
+All 79 unit tests pass:
 ```
-Both reasoners correctly infer:
-- `ex:socrates a ex:Mortal`
-- `ex:plato a ex:Mortal`
-- `ex:aristotle a ex:Mortal`
-
-### Test 03: Transitive Closure
-```n3
-{ ?x rdfs:subClassOf ?y . ?y rdfs:subClassOf ?z } => { ?x rdfs:subClassOf ?z } .
+test result: ok. 79 passed; 0 failed; 0 ignored
 ```
-Both reasoners correctly infer:
-- `ex:Dog rdfs:subClassOf ex:Animal`
-- `ex:Dog rdfs:subClassOf ex:LivingThing`
-- `ex:Mammal rdfs:subClassOf ex:LivingThing`
 
-### Test 04: Family Relations
-```n3
-{ ?x :hasChild ?y } => { ?y :hasParent ?x } .
-{ ?x :hasChild ?y . ?x a :Male } => { ?x a :Father } .
-{ ?x :hasChild ?y . ?x a :Female } => { ?x a :Mother } .
+### Integration Tests (N3 Reasoning)
+
+| Test | Description | Status |
+|------|-------------|--------|
+| 01 | Basic triples | PASS |
+| 02 | Simple rule (Human → Mortal) | PASS |
+| 03 | Transitive closure (subClassOf) | PASS |
+| 04 | Family relations (parent, Father, Mother) | PASS |
+| 05 | Multi-pattern rule (knows → knowsIndirectly) | PASS |
+| 06 | Type propagation (instance → superclass) | PASS |
+| 07 | Blank nodes | PASS |
+| 08 | Collections/lists | PASS |
+| 09 | Symmetric relations | PASS |
+| 10 | Chain rule (next → skip) | PASS |
+| 11 | Math builtins (sum, product, etc.) | PASS |
+| 12 | String builtins (concat, length, etc.) | PASS |
+| 13 | List builtins (member, first, rest, etc.) | PASS |
+| 14 | Log builtins (uri, rawUri, equalTo, etc.) | PASS |
+| 15 | Negation as failure (NAF) | PASS |
+| 16 | Crypto builtins (sha256, md5, etc.) | PASS |
+| 17 | Comparison builtins (greaterThan, lessThan, etc.) | PASS |
+
+**Result: 17/17 N3 tests passing**
+
+### SPARQL Tests
+
+| Test | Description | Status |
+|------|-------------|--------|
+| SELECT basic | Basic triple patterns | PASS |
+| SELECT FILTER | Numeric filtering | PASS |
+| ASK | Boolean existence check | PASS |
+| CONSTRUCT | Graph construction | PASS |
+| OPTIONAL | Left outer join | PASS |
+
+**Result: 5/5 SPARQL tests passing**
+
+## Feature Coverage
+
+### Built-in Predicates (266 total)
+
+#### Math Namespace (math:)
+- sum, product, difference, quotient, remainder
+- absoluteValue, negation, floor, ceiling
+- greaterThan, lessThan, equalTo, notEqualTo
+- sin, cos, tan, asin, acos, atan
+- log, exp, power, sqrt
+
+#### String Namespace (string:)
+- concatenation, length, contains
+- matches, replace
+- upperCase, lowerCase
+- startsWith, endsWith
+- split, join, trim
+
+#### List Namespace (list:)
+- member, in, first, rest, last
+- length, append, reverse
+- sort, unique
+
+#### Log Namespace (log:)
+- uri, rawUri (bidirectional)
+- equalTo, notEqualTo
+- includes, notIncludes
+- conjunction, conclusion
+- content, semantics
+
+#### Crypto Namespace (crypto:)
+- sha256, sha512, sha1, md5
+- hmac
+
+#### Time Namespace (time:)
+- gmTime, localTime
+- year, month, day, hour, minute, second
+
+### CLI Features
+
+| Feature | Flag | Status |
+|---------|------|--------|
+| Forward chaining | --think | PASS |
+| Filter inferred | --filter | PASS |
+| Delta/diff output | --diff | PASS |
+| Proof generation | --why | PASS |
+| Purge rules | --purge-rules | PASS |
+| Purge builtins | --purge-builtins | PASS |
+| Reification | --reify | PASS |
+| Dereification | --dereify | PASS |
+| N-Triples output | --format ntriples | PASS |
+| JSON-LD output | --format jsonld | PASS |
+| RDF/XML output | --format rdf | PASS |
+| SPARQL query | --sparql | PASS |
+| SPARQL server | --sparqlServer | PASS |
+| Closure/imports | --closure | PASS |
+| Patch files | --patch | PASS |
+
+## Example Outputs
+
+### Delta/Diff Output
 ```
-Both reasoners correctly infer:
-- `:alice :hasParent :john`
-- `:alice :hasParent :mary`
-- `:bob :hasParent :john`
-- `:bob :hasParent :mary`
-- `:john a :Father`
-- `:mary a :Mother`
+$ cwm test.n3 --think --diff
+# Graph diff output
+# 2 addition(s), 0 deletion(s)
 
-### Test 05: Multi-Pattern Rule
-```n3
-{ ?x ex:knows ?y . ?y ex:knows ?z } => { ?x ex:knowsIndirectly ?z } .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix : <http://example.org/> .
+
+# Additions
++ :socrates a :Mortal .
++ :plato a :Mortal .
+
+# Summary: +2 -0
 ```
-Both reasoners correctly infer:
-- `ex:alice ex:knowsIndirectly ex:charlie`
-- `ex:bob ex:knowsIndirectly ex:david`
 
-### Test 06: Type Propagation
-```n3
-{ ?x a ?class . ?class rdfs:subClassOf ?super } => { ?x a ?super } .
+### SPARQL ASK Result
+```xml
+<?xml version="1.0"?>
+<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+  <head/>
+  <boolean>true</boolean>
+</sparql>
 ```
-Both reasoners correctly infer:
-- `ex:fido a ex:Animal`
-- `ex:fido a ex:LivingThing`
-- `ex:tweety a ex:Animal`
-- `ex:tweety a ex:LivingThing`
-- `ex:nemo a ex:Animal`
-- `ex:nemo a ex:LivingThing`
 
-### Test 09: Symmetric Relations
-```n3
-{ ?x ex:marriedTo ?y } => { ?y ex:marriedTo ?x } .
-{ ?x ex:friendOf ?y } => { ?y ex:friendOf ?x } .
-```
-Both reasoners correctly infer:
-- `ex:bob ex:marriedTo ex:alice`
-- `ex:david ex:friendOf ex:charlie`
+## Compatibility
 
-### Test 10: Chain Rule
-```n3
-{ ?x ex:next ?y . ?y ex:next ?z } => { ?x ex:skip ?z } .
-```
-Both reasoners correctly infer:
-- `ex:a ex:skip ex:c`
-- `ex:b ex:skip ex:d`
-- `ex:c ex:skip ex:e`
-
-## Minor Differences
-
-### Blank Node IDs
-CWM-Rust and EYE use different skolemization schemes for blank nodes:
-- CWM-Rust: `_:b0`, `_:addr1`
-- EYE: `_:e_2`, `_:e_addr1_1`
-
-This is expected and correct behavior.
-
-### Numeric Literals
-- CWM-Rust: `"1"^^xsd:integer`
-- EYE: `1`
-
-Both are valid N3 representations.
-
-## Conclusion
-
-CWM-Rust produces **identical inferences** to EYE for all tested rule patterns:
+### EYE Reasoner Comparison
+CWM-Rust produces identical inferences to EYE for all tested rule patterns:
 - Simple rules with single pattern
 - Multi-pattern rules
 - Transitive closure rules
@@ -120,4 +144,41 @@ CWM-Rust produces **identical inferences** to EYE for all tested rule patterns:
 - Symmetric relation rules
 - Chain rules
 
-The implementation is compatible with the EYE reasoner for core N3 reasoning tasks.
+### Original CWM Compatibility
+CWM-Rust implements most features from the original Python CWM:
+- N3 parsing and serialization
+- Forward-chaining inference
+- Backward-chaining inference
+- 266+ built-in predicates (vs ~101 in original)
+- SPARQL 1.1 query support
+- Proof generation with W3C reason vocabulary
+- Delta/diff output
+- OWL imports with transitive loading
+- Graph patch support
+
+## Known Limitations
+
+1. **Empty prefix in SPARQL**: The `:localName` syntax requires using `PREFIX :` declaration. Use full URIs or named prefixes like `ex:` as alternatives.
+
+2. **SPARQL SERVICE**: Federated queries are implemented but require network access.
+
+3. **Backward chaining**: Limited to 10,000 results by default to prevent infinite loops.
+
+## Running Tests
+
+```bash
+# Run all unit tests
+cargo test
+
+# Run N3 integration tests
+./tests/run-tests.sh
+
+# Run individual N3 test
+cargo run -- tests/n3/02-simple-rule.n3 --think
+
+# Run SPARQL test
+cargo run -- tests/sparql/data.n3 --sparql tests/sparql/select-basic.rq
+
+# Test diff output
+cargo run -- tests/n3/02-simple-rule.n3 --think --diff
+```

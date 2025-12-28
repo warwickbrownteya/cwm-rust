@@ -1,0 +1,31 @@
+@prefix : <http://example.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Test data for SPARQL queries
+
+:alice a foaf:Person ;
+    foaf:name "Alice Smith" ;
+    foaf:age 30 ;
+    foaf:knows :bob, :charlie .
+
+:bob a foaf:Person ;
+    foaf:name "Bob Jones" ;
+    foaf:age 25 ;
+    foaf:knows :alice, :david .
+
+:charlie a foaf:Person ;
+    foaf:name "Charlie Brown" ;
+    foaf:age 35 ;
+    foaf:knows :alice .
+
+:david a foaf:Person ;
+    foaf:name "David Lee" ;
+    foaf:age 28 ;
+    foaf:mbox <mailto:david@example.org> .
+
+# Some class hierarchy
+foaf:Person rdfs:subClassOf :Agent .
+:Agent rdfs:subClassOf :Entity .

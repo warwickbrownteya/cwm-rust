@@ -1,0 +1,27 @@
+@prefix : <http://example.org/> .
+@prefix list: <http://www.w3.org/2000/10/swap/list#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Test list builtins
+
+# member
+:test1 :list (1 2 3 4 5) .
+{ :test1 :list ?list . ?list list:member 3 } => { :test1 :hasMember true } .
+
+# first
+{ (1 2 3) list:first ?result } => { :test2 :first ?result } .
+
+# rest
+{ (1 2 3) list:rest ?result } => { :test3 :rest ?result } .
+
+# last
+{ (1 2 3) list:last ?result } => { :test4 :last ?result } .
+
+# length
+{ (1 2 3 4) list:length ?result } => { :test5 :length ?result } .
+
+# append
+{ ((1 2) (3 4)) list:append ?result } => { :test6 :append ?result } .
+
+# in (reverse of member)
+{ 2 list:in (1 2 3) } => { :test7 :in true } .

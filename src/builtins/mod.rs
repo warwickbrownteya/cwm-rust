@@ -39,6 +39,78 @@ use crate::parser;
 // Re-export ureq for web fetching
 use ureq;
 
+/// Content types for RDF content negotiation
+const RDF_ACCEPT_HEADER: &str = "text/n3, text/turtle, application/n-triples;q=0.9, application/rdf+xml;q=0.8, application/ld+json;q=0.7, */*;q=0.1";
+
+/// Timeout for HTTP requests in seconds
+const HTTP_TIMEOUT_SECS: u64 = 30;
+
+/// Fetch a document from a URI with proper RDF content negotiation
+/// Returns (content, content_type) or error message
+fn fetch_rdf_document(uri: &str) -> Result<(String, String), String> {
+    if uri.starts_with("file://") {
+        let path = &uri[7..];
+        std::fs::read_to_string(path)
+            .map(|content| {
+                let content_type = if path.ends_with(".n3") || path.ends_with(".n3s") {
+                    "text/n3".to_string()
+                } else if path.ends_with(".ttl") {
+                    "text/turtle".to_string()
+                } else if path.ends_with(".nt") {
+                    "application/n-triples".to_string()
+                } else if path.ends_with(".rdf") || path.ends_with(".xml") {
+                    "application/rdf+xml".to_string()
+                } else if path.ends_with(".jsonld") || path.ends_with(".json") {
+                    "application/ld+json".to_string()
+                } else if path.ends_with(".kif") {
+                    "application/kif".to_string()
+                } else {
+                    "text/n3".to_string() // Default to N3
+                };
+                (content, content_type)
+            })
+            .map_err(|e| format!("File error: {}", e))
+    } else if uri.starts_with("http://") || uri.starts_with("https://") {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build();
+
+        agent.get(uri)
+            .set("Accept", RDF_ACCEPT_HEADER)
+            .set("User-Agent", "cwm-rust/0.1")
+            .call()
+            .map_err(|e| format!("HTTP error: {}", e))
+            .and_then(|response| {
+                let content_type = response.content_type().to_string();
+                response.into_string()
+                    .map(|content| (content, content_type))
+                    .map_err(|e| format!("Read error: {}", e))
+            })
+    } else {
+        // Assume local file path
+        std::fs::read_to_string(uri)
+            .map(|content| {
+                let content_type = if uri.ends_with(".n3") || uri.ends_with(".n3s") {
+                    "text/n3".to_string()
+                } else if uri.ends_with(".ttl") {
+                    "text/turtle".to_string()
+                } else if uri.ends_with(".nt") {
+                    "application/n-triples".to_string()
+                } else if uri.ends_with(".rdf") || uri.ends_with(".xml") {
+                    "application/rdf+xml".to_string()
+                } else if uri.ends_with(".jsonld") || uri.ends_with(".json") {
+                    "application/ld+json".to_string()
+                } else if uri.ends_with(".kif") {
+                    "application/kif".to_string()
+                } else {
+                    "text/n3".to_string()
+                };
+                (content, content_type)
+            })
+            .map_err(|e| format!("File error: {}", e))
+    }
+}
+
 /// Result of evaluating a built-in
 #[derive(Debug, Clone)]
 pub enum BuiltinResult {
@@ -2035,38 +2107,37 @@ impl BuiltinRegistry {
         });
 
         // log:semantics - uri log:semantics formula (loads and parses document)
-        // Fetches the document at URI and parses it as N3, returning the formula
+        // Fetches the document at URI with content negotiation and parses it
         self.register(&format!("{}semantics", ns::LOG), |subject, object, bindings| {
             if let Term::Uri(uri) = subject {
                 let uri_str = uri.as_str();
-                let content = if uri_str.starts_with("file://") {
-                    std::fs::read_to_string(&uri_str[7..]).ok()
-                } else if uri_str.starts_with("http://") || uri_str.starts_with("https://") {
-                    ureq::get(uri_str).call().ok().and_then(|r| r.into_string().ok())
-                } else {
-                    std::fs::read_to_string(uri_str).ok()
-                };
 
-                if let Some(content) = content {
-                    // Parse the content using the N3 parser
-                    match parser::parse(&content) {
-                        Ok(parse_result) => {
-                            let result = Term::Formula(FormulaRef::new(0, parse_result.triples));
-                            if let Term::Variable(var) = object {
-                                let mut new_bindings = bindings.clone();
-                                new_bindings.insert(var.clone(), result);
-                                return BuiltinResult::Success(new_bindings);
-                            } else if let Term::Formula(obj_formula) = object {
-                                if let Term::Formula(res_formula) = &result {
-                                    if res_formula.triples() == obj_formula.triples() {
-                                        return BuiltinResult::Success(bindings.clone());
+                match fetch_rdf_document(uri_str) {
+                    Ok((content, _content_type)) => {
+                        // Parse the content using the N3 parser
+                        // TODO: Use content_type to select parser when we support more formats
+                        match parser::parse(&content) {
+                            Ok(parse_result) => {
+                                let result = Term::Formula(FormulaRef::new(0, parse_result.triples));
+                                if let Term::Variable(var) = object {
+                                    let mut new_bindings = bindings.clone();
+                                    new_bindings.insert(var.clone(), result);
+                                    return BuiltinResult::Success(new_bindings);
+                                } else if let Term::Formula(obj_formula) = object {
+                                    if let Term::Formula(res_formula) = &result {
+                                        if res_formula.triples() == obj_formula.triples() {
+                                            return BuiltinResult::Success(bindings.clone());
+                                        }
                                     }
                                 }
                             }
+                            Err(_) => {
+                                return BuiltinResult::Failure;
+                            }
                         }
-                        Err(_) => {
-                            return BuiltinResult::Failure;
-                        }
+                    }
+                    Err(_) => {
+                        return BuiltinResult::Failure;
                     }
                 }
             }
@@ -2143,23 +2214,15 @@ impl BuiltinRegistry {
         });
 
         // log:semanticsOrError - uri log:semanticsOrError formulaOrError
-        // Returns formula if successful, error string otherwise
+        // Returns formula if successful, error string otherwise (with content negotiation)
         self.register(&format!("{}semanticsOrError", ns::LOG), |subject, object, bindings| {
             if let Term::Uri(uri) = subject {
                 let uri_str = uri.as_str();
-                let content_result = if uri_str.starts_with("file://") {
-                    std::fs::read_to_string(&uri_str[7..])
-                } else if uri_str.starts_with("http://") || uri_str.starts_with("https://") {
-                    ureq::get(uri_str).call()
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                        .and_then(|r| r.into_string().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
-                } else {
-                    std::fs::read_to_string(uri_str)
-                };
 
-                let result = match content_result {
-                    Ok(content) => {
+                let result = match fetch_rdf_document(uri_str) {
+                    Ok((content, _content_type)) => {
                         // Parse the content using the N3 parser
+                        // TODO: Use content_type to select parser when we support more formats
                         match parser::parse(&content) {
                             Ok(parse_result) => {
                                 Term::Formula(FormulaRef::new(0, parse_result.triples))
@@ -2170,7 +2233,7 @@ impl BuiltinRegistry {
                         }
                     }
                     Err(e) => {
-                        Term::literal(format!("Fetch error: {}", e))
+                        Term::literal(e)
                     }
                 };
 

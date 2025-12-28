@@ -1,0 +1,7 @@
+# ASK query - does Alice exist?
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
+ASK WHERE {
+    <http://example.org/alice> a foaf:Person .
+    <http://example.org/alice> foaf:name ?name .
+}

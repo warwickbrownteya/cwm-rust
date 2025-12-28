@@ -2,6 +2,13 @@
 //!
 //! This module implements a parser for Notation3 (N3) and Turtle syntax,
 //! including N3 rules with formula syntax: `{ body } => { head } .`
+//!
+//! Also includes a KIF (Knowledge Interchange Format) parser for logic-based
+//! knowledge representation.
+
+pub mod kif;
+
+pub use kif::parse_kif;
 
 use std::sync::Arc;
 

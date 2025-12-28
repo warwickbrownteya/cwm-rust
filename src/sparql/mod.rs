@@ -1,8 +1,10 @@
 //! SPARQL query support
 //!
 //! Implements a subset of SPARQL 1.1 for querying RDF graphs.
+//! Includes federated query support via SERVICE keyword.
 
 use std::collections::HashMap;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use crate::term::{Term, Triple};
 use crate::Store;
 
@@ -50,6 +52,8 @@ pub enum GraphPattern {
     Bind(FilterExpr, String),
     /// Subquery group
     Group(Box<WhereClause>),
+    /// SERVICE for federated queries (endpoint URI, patterns, silent flag)
+    Service(String, Box<WhereClause>, bool),
 }
 
 /// Triple pattern with possible variables
@@ -503,6 +507,42 @@ impl<'a> SparqlParser<'a> {
                 patterns.push(GraphPattern::Bind(expr, var_name));
                 continue;
             }
+
+            // Check for SERVICE (federated query)
+            let silent = if self.try_keyword("SERVICE") {
+                self.skip_whitespace();
+                let is_silent = self.try_keyword("SILENT");
+                if is_silent {
+                    self.skip_whitespace();
+                }
+
+                // Parse endpoint URI
+                let endpoint = if self.current_char() == '<' {
+                    self.pos += 1;
+                    let start = self.pos;
+                    while self.pos < self.input.len() && self.current_char() != '>' {
+                        self.pos += 1;
+                    }
+                    let uri = self.input[start..self.pos].to_string();
+                    if self.current_char() == '>' {
+                        self.pos += 1;
+                    }
+                    uri
+                } else if self.current_char() == '?' || self.current_char() == '$' {
+                    // Variable endpoint - not supported yet, skip
+                    return Err("Variable SERVICE endpoints not yet supported".to_string());
+                } else {
+                    return Err("Expected URI after SERVICE".to_string());
+                };
+
+                // Parse the service pattern
+                let service_clause = self.parse_where_clause()?;
+                patterns.push(GraphPattern::Service(endpoint, Box::new(service_clause), is_silent));
+                continue;
+            } else {
+                false
+            };
+            let _ = silent; // Suppress unused warning
 
             // Check for nested group
             if self.current_char() == '{' {
@@ -1203,7 +1243,358 @@ impl<'a> SparqlEngine<'a> {
             GraphPattern::Group(inner) => {
                 self.evaluate_where_with_solutions(inner, solutions)
             }
+            GraphPattern::Service(endpoint, service_clause, silent) => {
+                // Execute federated query against remote SPARQL endpoint
+                self.evaluate_service(endpoint, service_clause, solutions, *silent)
+            }
         }
+    }
+
+    /// Execute a SERVICE query against a remote SPARQL endpoint
+    fn evaluate_service(
+        &self,
+        endpoint: &str,
+        service_clause: &WhereClause,
+        solutions: Vec<HashMap<String, Term>>,
+        silent: bool,
+    ) -> Vec<HashMap<String, Term>> {
+        let mut result = Vec::new();
+
+        for solution in solutions {
+            // Build a SPARQL query from the service clause
+            let query = self.build_service_query(service_clause, &solution);
+
+            // Execute against remote endpoint
+            match self.execute_remote_query(endpoint, &query) {
+                Ok(remote_solutions) => {
+                    // Merge remote solutions with current solution
+                    for remote_sol in remote_solutions {
+                        let mut merged = solution.clone();
+                        merged.extend(remote_sol);
+                        result.push(merged);
+                    }
+                }
+                Err(e) => {
+                    if !silent {
+                        eprintln!("SERVICE error for {}: {}", endpoint, e);
+                    }
+                    // If silent, continue with current solution unchanged
+                    if silent {
+                        result.push(solution.clone());
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Build a SELECT query from a WHERE clause for remote execution
+    fn build_service_query(&self, clause: &WhereClause, bindings: &HashMap<String, Term>) -> String {
+        // Collect variables used in patterns
+        let mut vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        fn collect_vars_from_pattern(pattern: &GraphPattern, vars: &mut std::collections::HashSet<String>) {
+            match pattern {
+                GraphPattern::Triple(tp) => {
+                    if let TermPattern::Variable(v) = &tp.subject { vars.insert(v.clone()); }
+                    if let TermPattern::Variable(v) = &tp.predicate { vars.insert(v.clone()); }
+                    if let TermPattern::Variable(v) = &tp.object { vars.insert(v.clone()); }
+                }
+                GraphPattern::Optional(inner) |
+                GraphPattern::Group(inner) => {
+                    for p in &inner.patterns {
+                        collect_vars_from_pattern(p, vars);
+                    }
+                }
+                GraphPattern::Union(left, right) => {
+                    for p in &left.patterns {
+                        collect_vars_from_pattern(p, vars);
+                    }
+                    for p in &right.patterns {
+                        collect_vars_from_pattern(p, vars);
+                    }
+                }
+                GraphPattern::Bind(_, var) => {
+                    vars.insert(var.clone());
+                }
+                GraphPattern::Filter(_) | GraphPattern::Service(_, _, _) => {}
+            }
+        }
+
+        for pattern in &clause.patterns {
+            collect_vars_from_pattern(pattern, &mut vars);
+        }
+
+        // Build SELECT clause - only include unbound variables
+        let select_vars: Vec<String> = vars.iter()
+            .filter(|v| !bindings.contains_key(*v))
+            .map(|v| format!("?{}", v))
+            .collect();
+
+        let select_clause = if select_vars.is_empty() {
+            "*".to_string()
+        } else {
+            select_vars.join(" ")
+        };
+
+        // Build WHERE clause
+        let where_clause = self.patterns_to_sparql(&clause.patterns, bindings);
+
+        format!("SELECT {} WHERE {{ {} }}", select_clause, where_clause)
+    }
+
+    /// Convert patterns to SPARQL string, substituting bound variables
+    fn patterns_to_sparql(&self, patterns: &[GraphPattern], bindings: &HashMap<String, Term>) -> String {
+        let mut parts = Vec::new();
+
+        for pattern in patterns {
+            match pattern {
+                GraphPattern::Triple(tp) => {
+                    let s = self.term_pattern_to_sparql(&tp.subject, bindings);
+                    let p = self.term_pattern_to_sparql(&tp.predicate, bindings);
+                    let o = self.term_pattern_to_sparql(&tp.object, bindings);
+                    parts.push(format!("{} {} {} .", s, p, o));
+                }
+                GraphPattern::Optional(inner) => {
+                    let inner_str = self.patterns_to_sparql(&inner.patterns, bindings);
+                    parts.push(format!("OPTIONAL {{ {} }}", inner_str));
+                }
+                GraphPattern::Filter(expr) => {
+                    parts.push(format!("FILTER({})", self.filter_to_sparql(expr, bindings)));
+                }
+                _ => {}
+            }
+        }
+
+        parts.join(" ")
+    }
+
+    /// Convert a term pattern to SPARQL string
+    fn term_pattern_to_sparql(&self, tp: &TermPattern, bindings: &HashMap<String, Term>) -> String {
+        match tp {
+            TermPattern::Variable(v) => {
+                if let Some(term) = bindings.get(v) {
+                    self.term_to_sparql(term)
+                } else {
+                    format!("?{}", v)
+                }
+            }
+            TermPattern::Term(t) => self.term_to_sparql(t),
+        }
+    }
+
+    /// Convert a term to SPARQL string
+    fn term_to_sparql(&self, term: &Term) -> String {
+        match term {
+            Term::Uri(uri) => format!("<{}>", uri.as_str()),
+            Term::Literal(lit) => {
+                if let Some(lang) = lit.language() {
+                    format!("\"{}\"@{}", lit.value(), lang)
+                } else if let Some(dt) = lit.datatype_uri() {
+                    format!("\"{}\"^^<{}>", lit.value(), dt)
+                } else {
+                    format!("\"{}\"", lit.value())
+                }
+            }
+            Term::BlankNode(bn) => format!("_:{}", bn.id()),
+            _ => "[]".to_string(),
+        }
+    }
+
+    /// Convert filter expression to SPARQL string
+    fn filter_to_sparql(&self, expr: &FilterExpr, bindings: &HashMap<String, Term>) -> String {
+        match expr {
+            FilterExpr::Var(v) => {
+                if let Some(term) = bindings.get(v) {
+                    self.term_to_sparql(term)
+                } else {
+                    format!("?{}", v)
+                }
+            }
+            FilterExpr::Literal(t) => self.term_to_sparql(t),
+            FilterExpr::Bound(v) => format!("BOUND(?{})", v),
+            FilterExpr::NotBound(v) => format!("!BOUND(?{})", v),
+            FilterExpr::Equals(a, b) => format!("({} = {})", self.filter_to_sparql(a, bindings), self.filter_to_sparql(b, bindings)),
+            FilterExpr::NotEquals(a, b) => format!("({} != {})", self.filter_to_sparql(a, bindings), self.filter_to_sparql(b, bindings)),
+            FilterExpr::LessThan(a, b) => format!("({} < {})", self.filter_to_sparql(a, bindings), self.filter_to_sparql(b, bindings)),
+            FilterExpr::GreaterThan(a, b) => format!("({} > {})", self.filter_to_sparql(a, bindings), self.filter_to_sparql(b, bindings)),
+            FilterExpr::And(a, b) => format!("({} && {})", self.filter_to_sparql(a, bindings), self.filter_to_sparql(b, bindings)),
+            FilterExpr::Or(a, b) => format!("({} || {})", self.filter_to_sparql(a, bindings), self.filter_to_sparql(b, bindings)),
+            FilterExpr::Not(a) => format!("!({})", self.filter_to_sparql(a, bindings)),
+            _ => "true".to_string(),
+        }
+    }
+
+    /// Execute a query against a remote SPARQL endpoint
+    fn execute_remote_query(&self, endpoint: &str, query: &str) -> Result<Vec<HashMap<String, Term>>, String> {
+        // URL-encode the query using percent-encoding
+        let encoded_query: String = utf8_percent_encode(query, NON_ALPHANUMERIC).to_string();
+        let url = format!("{}?query={}", endpoint, encoded_query);
+
+        // Execute HTTP request
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(30))
+            .build();
+
+        let response = agent.get(&url)
+            .set("Accept", "application/sparql-results+json")
+            .call()
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        let json_str = response.into_string()
+            .map_err(|e| format!("Read error: {}", e))?;
+
+        // Parse JSON response
+        self.parse_sparql_json_results(&json_str)
+    }
+
+    /// Parse SPARQL JSON results format
+    fn parse_sparql_json_results(&self, json: &str) -> Result<Vec<HashMap<String, Term>>, String> {
+        // Simple JSON parsing for SPARQL results
+        // Format: { "results": { "bindings": [ { "var": { "type": "uri", "value": "..." } } ] } }
+
+        let mut solutions = Vec::new();
+
+        // Find bindings array
+        if let Some(bindings_start) = json.find("\"bindings\"") {
+            let rest = &json[bindings_start..];
+            if let Some(arr_start) = rest.find('[') {
+                let arr_rest = &rest[arr_start + 1..];
+
+                // Parse each binding object
+                let mut depth = 1;
+                let mut obj_start = 0;
+                let mut in_string = false;
+                let mut escape_next = false;
+
+                for (i, c) in arr_rest.char_indices() {
+                    if escape_next {
+                        escape_next = false;
+                        continue;
+                    }
+                    if c == '\\' {
+                        escape_next = true;
+                        continue;
+                    }
+                    if c == '"' {
+                        in_string = !in_string;
+                        continue;
+                    }
+                    if in_string {
+                        continue;
+                    }
+
+                    if c == '{' {
+                        if depth == 1 {
+                            obj_start = i;
+                        }
+                        depth += 1;
+                    } else if c == '}' {
+                        depth -= 1;
+                        if depth == 1 {
+                            // Found a complete binding object
+                            let obj = &arr_rest[obj_start..=i];
+                            if let Ok(binding) = self.parse_binding_object(obj) {
+                                solutions.push(binding);
+                            }
+                        }
+                    } else if c == ']' && depth == 1 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(solutions)
+    }
+
+    /// Parse a single binding object from SPARQL JSON results
+    fn parse_binding_object(&self, obj: &str) -> Result<HashMap<String, Term>, String> {
+        let mut binding = HashMap::new();
+
+        // Very simple parser for { "var": { "type": "...", "value": "..." } }
+        let mut pos = 0;
+        while let Some(var_start) = obj[pos..].find('"') {
+            let rest = &obj[pos + var_start + 1..];
+            if let Some(var_end) = rest.find('"') {
+                let var_name = &rest[..var_end];
+
+                // Skip to the value object
+                let after_var = &rest[var_end + 1..];
+                if let Some(obj_start) = after_var.find('{') {
+                    let value_rest = &after_var[obj_start..];
+                    if let Some(obj_end) = value_rest.find('}') {
+                        let value_obj = &value_rest[..obj_end + 1];
+
+                        // Extract type and value
+                        let term_type = self.extract_json_value(value_obj, "type");
+                        let value = self.extract_json_value(value_obj, "value");
+
+                        if let (Some(t), Some(v)) = (term_type, value) {
+                            let term = match t.as_str() {
+                                "uri" => Term::uri(&v),
+                                "literal" => {
+                                    let lang = self.extract_json_value(value_obj, "xml:lang");
+                                    let datatype = self.extract_json_value(value_obj, "datatype");
+                                    if let Some(l) = lang {
+                                        Term::lang_literal(&v, &l)
+                                    } else if let Some(dt) = datatype {
+                                        Term::typed_literal(&v, &dt)
+                                    } else {
+                                        Term::literal(&v)
+                                    }
+                                }
+                                "bnode" => Term::blank(&v),
+                                _ => Term::literal(&v),
+                            };
+                            binding.insert(var_name.to_string(), term);
+                        }
+
+                        pos = pos + var_start + var_end + obj_start + obj_end + 3;
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+
+        Ok(binding)
+    }
+
+    /// Extract a value from a simple JSON object
+    fn extract_json_value(&self, obj: &str, key: &str) -> Option<String> {
+        let pattern = format!("\"{}\"", key);
+        if let Some(key_pos) = obj.find(&pattern) {
+            let rest = &obj[key_pos + pattern.len()..];
+            // Skip to the value
+            if let Some(colon) = rest.find(':') {
+                let after_colon = rest[colon + 1..].trim_start();
+                if after_colon.starts_with('"') {
+                    let value_start = 1;
+                    let value_rest = &after_colon[value_start..];
+                    // Find end of string, handling escapes
+                    let mut end = 0;
+                    let mut escape = false;
+                    for (i, c) in value_rest.char_indices() {
+                        if escape {
+                            escape = false;
+                            continue;
+                        }
+                        if c == '\\' {
+                            escape = true;
+                            continue;
+                        }
+                        if c == '"' {
+                            end = i;
+                            break;
+                        }
+                    }
+                    return Some(value_rest[..end].to_string());
+                }
+            }
+        }
+        None
     }
 
     fn evaluate_where_with_bindings(&self, where_clause: &WhereClause, initial: HashMap<String, Term>) -> Vec<HashMap<String, Term>> {

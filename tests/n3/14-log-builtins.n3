@@ -1,0 +1,25 @@
+@prefix : <http://example.org/> .
+@prefix log: <http://www.w3.org/2000/10/swap/log#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Test log builtins
+
+# log:uri - convert between string and URI
+{ "http://example.org/test" log:uri ?uri } => { :test1 :uri ?uri } .
+
+# log:rawUri - get raw URI string
+{ <http://example.org/test> log:rawUri ?str } => { :test2 :rawUri ?str } .
+
+# log:equalTo
+{ 42 log:equalTo 42 } => { :test3 :equalTo true } .
+
+# log:notEqualTo
+{ 1 log:notEqualTo 2 } => { :test4 :notEqualTo true } .
+
+# log:includes test
+:graph1 log:includes { :s :p :o } .
+:s :p :o .
+{ :graph1 log:includes { :s :p :o } } => { :test5 :includes true } .
+
+# log:conjunction
+{ ( { :a :b :c } { :d :e :f } ) log:conjunction ?result } => { :test6 :conjunction ?result } .

@@ -75,7 +75,7 @@ pub use crate::core::{
 pub use term::{Term, Triple, Bindings, Uri, Literal, Datatype, BlankNode, Variable, List, FormulaRef};
 
 // Re-export parser types
-pub use parser::{parse, ParseResult, ParseError, ParserState, Formula, N3Parser};
+pub use parser::{parse, parse_kif, ParseResult, ParseError, ParserState, Formula, N3Parser};
 
 // Re-export store types
 pub use store::Store;

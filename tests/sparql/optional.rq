@@ -1,0 +1,9 @@
+# SELECT with OPTIONAL
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
+SELECT ?name ?mbox
+WHERE {
+    ?person a foaf:Person .
+    ?person foaf:name ?name .
+    OPTIONAL { ?person foaf:mbox ?mbox }
+}

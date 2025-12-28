@@ -1,0 +1,10 @@
+# Basic SELECT query
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
+SELECT ?name ?age
+WHERE {
+    ?person a foaf:Person .
+    ?person foaf:name ?name .
+    ?person foaf:age ?age .
+}
+ORDER BY ?name

@@ -279,6 +279,10 @@ struct Cli {
     #[arg(long)]
     why: bool,
 
+    /// Output diff/delta showing what changed (additions/deletions)
+    #[arg(long)]
+    diff: bool,
+
     /// Closure flags for automatic imports: s=subject, p=predicate, o=object,
     /// t=type, i=imports, r=rules, E=errors, n=no
     #[arg(long = "closure", value_name = "FLAGS")]
@@ -398,6 +402,13 @@ fn main() -> Result<()> {
         store.iter().cloned().collect()
     } else {
         std::collections::HashSet::new()
+    };
+
+    // Save store state before reasoning for --diff mode
+    let before_store = if cli.diff {
+        Some(store.clone())
+    } else {
+        None
     };
 
     if !cli.quiet && cli.verbose {
@@ -622,6 +633,22 @@ fn main() -> Result<()> {
     // Suppress output if --no flag is set
     if cli.no {
         return Ok(());
+    }
+
+    // Output diff if --diff was specified
+    if cli.diff {
+        if let Some(before) = before_store {
+            let (additions, deletions) = graph_diff(&before, &output_store);
+            let diff_output = format_diff(&additions, &deletions, &all_prefixes);
+            if let Some(output_path) = &cli.output {
+                fs::write(output_path, &diff_output)
+                    .with_context(|| format!("Failed to write diff to: {}", output_path.display()))?;
+            } else {
+                io::stdout().write_all(diff_output.as_bytes())
+                    .context("Failed to write diff to stdout")?;
+            }
+            return Ok(());
+        }
     }
 
     // Output proof trace if --why was specified
@@ -1330,6 +1357,7 @@ fn apply_patch(store: &mut Store, patch_content: &str, prefixes: &mut IndexMap<S
 }
 
 /// Load closure (imports) based on flags
+/// Supports transitive imports with cycle detection and caching
 fn load_closure(
     store: &mut Store,
     prefixes: &mut IndexMap<String, String>,
@@ -1344,22 +1372,36 @@ fn load_closure(
         return Ok(());
     }
 
-    // Find owl:imports statements
+    // Track already loaded URIs to prevent cycles and duplicate loading
+    let mut loaded_uris: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Queue of URIs to load (for transitive imports)
+    let mut pending_uris: Vec<String> = Vec::new();
+
+    // Find initial owl:imports statements
     let owl_imports = "http://www.w3.org/2002/07/owl#imports";
-    let mut import_uris: Vec<String> = Vec::new();
 
     for triple in store.iter() {
         if let Term::Uri(pred) = &triple.predicate {
             if pred.as_str() == owl_imports {
                 if let Term::Uri(obj) = &triple.object {
-                    import_uris.push(obj.as_str().to_string());
+                    let uri = obj.as_str().to_string();
+                    if !loaded_uris.contains(&uri) {
+                        pending_uris.push(uri);
+                    }
                 }
             }
         }
     }
 
-    // Load each imported document
-    for uri in import_uris {
+    // Process imports transitively
+    while let Some(uri) = pending_uris.pop() {
+        // Skip if already loaded
+        if loaded_uris.contains(&uri) {
+            continue;
+        }
+        loaded_uris.insert(uri.clone());
+
         if verbose {
             eprintln!("Loading import: {}", uri);
         }
@@ -1368,32 +1410,63 @@ fn load_closure(
         match fetch_document(&uri) {
             Ok(content) => {
                 if let Ok(result) = parse(&content) {
-                    store.add_all(result.triples);
+                    // Add triples
+                    store.add_all(result.triples.clone());
                     prefixes.extend(result.prefixes);
+
                     if load_rules {
                         rules.extend(result.rules);
+                    }
+
+                    // Find transitive imports in the loaded document
+                    for triple in &result.triples {
+                        if let Term::Uri(pred) = &triple.predicate {
+                            if pred.as_str() == owl_imports {
+                                if let Term::Uri(obj) = &triple.object {
+                                    let import_uri = obj.as_str().to_string();
+                                    if !loaded_uris.contains(&import_uri) {
+                                        pending_uris.push(import_uri);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
             Err(e) => {
-                if !flags.contains('E') {
-                    // Ignore errors unless E flag is set
+                if flags.contains('E') {
+                    // Report error if E flag is set
+                    return Err(e);
+                } else {
                     eprintln!("Warning: Failed to load {}: {}", uri, e);
                 }
             }
         }
     }
 
+    if verbose && !loaded_uris.is_empty() {
+        eprintln!("Loaded {} import(s)", loaded_uris.len());
+    }
+
     Ok(())
 }
 
-/// Fetch a document from a URI (file or HTTP)
+/// Content types for RDF content negotiation
+const RDF_ACCEPT: &str = "text/n3, text/turtle, application/n-triples;q=0.9, application/rdf+xml;q=0.8, application/ld+json;q=0.7, */*;q=0.1";
+
+/// Fetch a document from a URI (file or HTTP) with content negotiation
 fn fetch_document(uri: &str) -> Result<String> {
     if uri.starts_with("file://") {
         let path = &uri[7..];
         fs::read_to_string(path).context("Failed to read local file")
     } else if uri.starts_with("http://") || uri.starts_with("https://") {
-        let response = ureq::get(uri)
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(30))
+            .build();
+
+        let response = agent.get(uri)
+            .set("Accept", RDF_ACCEPT)
+            .set("User-Agent", "cwm-rust/0.1")
             .call()
             .map_err(|e| anyhow::anyhow!("HTTP error: {}", e))?;
         response.into_string().context("Failed to read HTTP response")
@@ -1524,6 +1597,70 @@ pub fn graph_diff(before: &Store, after: &Store) -> (Vec<Triple>, Vec<Triple>) {
         .collect();
 
     (additions, deletions)
+}
+
+/// Format diff output in N3 patch format
+///
+/// Output format compatible with cwm's --diff:
+/// - Lines starting with + are additions
+/// - Lines starting with - are deletions
+/// - Prefixes are included for readability
+fn format_diff(additions: &[Triple], deletions: &[Triple], prefixes: &IndexMap<String, String>) -> String {
+    let mut output = String::new();
+    let formatter = N3Formatter::new(prefixes);
+
+    // Header
+    output.push_str("# Graph diff output\n");
+    output.push_str(&format!("# {} addition(s), {} deletion(s)\n\n", additions.len(), deletions.len()));
+
+    // Collect and output used prefixes
+    let mut used_namespaces: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for triple in additions.iter().chain(deletions.iter()) {
+        collect_used_namespaces(&triple.subject, prefixes, &mut used_namespaces);
+        collect_used_namespaces(&triple.predicate, prefixes, &mut used_namespaces);
+        collect_used_namespaces(&triple.object, prefixes, &mut used_namespaces);
+    }
+
+    for (short, long) in prefixes {
+        if used_namespaces.contains(long) {
+            output.push_str(&format!("@prefix {}: <{}> .\n", short, long));
+        }
+    }
+    if !used_namespaces.is_empty() {
+        output.push('\n');
+    }
+
+    // Output deletions first (things that were removed)
+    if !deletions.is_empty() {
+        output.push_str("# Deletions\n");
+        for triple in deletions {
+            output.push_str(&format!(
+                "- {} {} {} .\n",
+                formatter.format_term(&triple.subject),
+                formatter.format_term(&triple.predicate),
+                formatter.format_term(&triple.object)
+            ));
+        }
+        output.push('\n');
+    }
+
+    // Output additions (things that were added)
+    if !additions.is_empty() {
+        output.push_str("# Additions\n");
+        for triple in additions {
+            output.push_str(&format!(
+                "+ {} {} {} .\n",
+                formatter.format_term(&triple.subject),
+                formatter.format_term(&triple.predicate),
+                formatter.format_term(&triple.object)
+            ));
+        }
+    }
+
+    // Summary at end
+    output.push_str(&format!("\n# Summary: +{} -{}\n", additions.len(), deletions.len()));
+
+    output
 }
 
 /// Format N3 with custom options

@@ -1,0 +1,28 @@
+@prefix : <http://example.org/> .
+@prefix math: <http://www.w3.org/2000/10/swap/math#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Test math builtins
+
+# sum
+:test1 :input (1 2 3) .
+{ :test1 :input ?list . ?list math:sum ?result } => { :test1 :sum ?result } .
+
+# product
+:test2 :input (2 3 4) .
+{ :test2 :input ?list . ?list math:product ?result } => { :test2 :product ?result } .
+
+# difference
+{ (10 3) math:difference ?result } => { :test3 :difference ?result } .
+
+# quotient
+{ (20 4) math:quotient ?result } => { :test4 :quotient ?result } .
+
+# remainder
+{ (17 5) math:remainder ?result } => { :test5 :remainder ?result } .
+
+# absoluteValue
+{ (-5) math:absoluteValue ?result } => { :test6 :absoluteValue ?result } .
+
+# negation
+{ (7) math:negation ?result } => { :test7 :negation ?result } .

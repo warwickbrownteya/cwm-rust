@@ -1,0 +1,29 @@
+@prefix : <http://example.org/> .
+@prefix math: <http://www.w3.org/2000/10/swap/math#> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+
+# Test comparison builtins
+
+# math:greaterThan
+{ 5 math:greaterThan 3 } => { :test1 :greaterThan true } .
+
+# math:lessThan
+{ 3 math:lessThan 5 } => { :test2 :lessThan true } .
+
+# math:notGreaterThan
+{ 3 math:notGreaterThan 5 } => { :test3 :notGreaterThan true } .
+
+# math:notLessThan
+{ 5 math:notLessThan 3 } => { :test4 :notLessThan true } .
+
+# math:equalTo
+{ 5 math:equalTo 5 } => { :test5 :equalTo true } .
+
+# math:notEqualTo
+{ 5 math:notEqualTo 3 } => { :test6 :notEqualTo true } .
+
+# string:greaterThan
+{ "beta" string:greaterThan "alpha" } => { :test7 :strGreaterThan true } .
+
+# string:lessThan
+{ "alpha" string:lessThan "beta" } => { :test8 :strLessThan true } .

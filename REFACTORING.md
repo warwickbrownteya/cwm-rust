@@ -38,7 +38,7 @@ This document outlines a comprehensive refactoring strategy to transform cwm-rus
 │  ┌──────┴────────────────┴────────────────┴────────────────┴──────┐ │
 │  │                     Core Traits Layer                          │ │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐  │ │
-│  │  │TermStore │ │BuiltinEv│ │InferenceE│ │PatternMatcher    │  │ │
+│  │  │TermStore │ │BuiltinEv │ │InferenceE│ │PatternMatcher    │  │ │
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘  │ │
 │  └────────────────────────────────────────────────────────────────┘ │
 │  ┌────────────────────────────────────────────────────────────────┐ │

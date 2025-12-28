@@ -1,0 +1,31 @@
+@prefix : <http://example.org/> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+
+# Test string builtins
+
+# concatenation
+{ ("Hello" " " "World") string:concatenation ?result } => { :test1 :concat ?result } .
+
+# length
+{ "Hello" string:length ?result } => { :test2 :length ?result } .
+
+# contains
+{ "Hello World" string:contains "World" } => { :test3 :contains true } .
+
+# matches (regex)
+{ "hello123" string:matches "[0-9]+" } => { :test4 :matches true } .
+
+# upperCase
+{ "hello" string:upperCase ?result } => { :test5 :upperCase ?result } .
+
+# lowerCase
+{ "HELLO" string:lowerCase ?result } => { :test6 :lowerCase ?result } .
+
+# startsWith
+{ "Hello World" string:startsWith "Hello" } => { :test7 :startsWith true } .
+
+# endsWith
+{ "Hello World" string:endsWith "World" } => { :test8 :endsWith true } .
+
+# replace
+{ ("Hello World" "World" "Universe") string:replace ?result } => { :test9 :replace ?result } .

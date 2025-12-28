@@ -1,0 +1,31 @@
+@prefix : <http://example.org/> .
+@prefix log: <http://www.w3.org/2000/10/swap/log#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Test negation as failure (NAF)
+
+# Define some facts
+:bird1 a :Bird .
+:bird1 a :Penguin .
+
+:bird2 a :Bird .
+
+:bird3 a :Bird .
+:bird3 a :Ostrich .
+
+# Penguins and ostriches don't fly
+:Penguin :cantFly true .
+:Ostrich :cantFly true .
+
+# Birds fly unless they are penguins or ostriches (closed world assumption)
+# Using log:notIncludes for NAF pattern
+{
+  ?x a :Bird .
+  ?x a ?type .
+  ?type :cantFly true .
+} => { ?x :canFly false } .
+
+{
+  ?x a :Bird .
+  ?scope log:notIncludes { ?x :canFly false } .
+} => { ?x :canFly true } .

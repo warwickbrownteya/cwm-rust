@@ -1,0 +1,16 @@
+@prefix : <http://example.org/> .
+@prefix crypto: <http://www.w3.org/2000/10/swap/crypto#> .
+
+# Test crypto builtins
+
+# sha256
+{ "hello" crypto:sha256 ?hash } => { :test1 :sha256 ?hash } .
+
+# sha512
+{ "hello" crypto:sha512 ?hash } => { :test2 :sha512 ?hash } .
+
+# md5
+{ "hello" crypto:md5 ?hash } => { :test3 :md5 ?hash } .
+
+# sha1
+{ "hello" crypto:sha1 ?hash } => { :test4 :sha1 ?hash } .
