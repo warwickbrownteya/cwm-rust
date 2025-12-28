@@ -1,6 +1,6 @@
 # CWM vs cwm-rust Gap Analysis
 
-**Date**: 2025-12-28 (Updated)
+**Date**: 2025-12-28 (Updated - Extended analysis)
 **cwm-rust version**: 0.1.0
 **Original CWM reference**: W3C SWAP (https://www.w3.org/2000/10/swap/)
 
@@ -88,7 +88,17 @@
 | `Chaff` | ✅ | ✅ | Chaff class |
 | `N3Document` | ✅ | ✅ | ✅ IMPLEMENTED |
 | `Truth` | ✅ | ✅ | ✅ IMPLEMENTED |
-| `collectAllIn` | ✅ | ✅ | Collect bindings |
+| `collectAllIn` | ✅ | ✅ | ✅ IMPLEMENTED - Full pattern matching |
+| `findall` | ✅ | ✅ | ✅ IMPLEMENTED - Collect all bindings |
+| `forAllIn` | ✅ | ✅ | ✅ IMPLEMENTED - Universal quantification |
+| `merge` | ❌ | ✅ | cwm-rust extra: merge formulas |
+| `copy` | ❌ | ✅ | cwm-rust extra: deep copy formula |
+| `filter` | ❌ | ✅ | cwm-rust extra: filter by pattern |
+| `reject` | ❌ | ✅ | cwm-rust extra: reject by pattern |
+| `difference` | ❌ | ✅ | cwm-rust extra: set difference |
+| `intersection` | ❌ | ✅ | cwm-rust extra: set intersection |
+| `tripleCount` | ❌ | ✅ | cwm-rust extra: count triples |
+| `becomes` | ❌ | ✅ | cwm-rust extra: substitution |
 | `langlit` | ❌ | ✅ | cwm-rust extra |
 | `forAll` | ❌ | ✅ | cwm-rust extra |
 | `forSome` | ❌ | ✅ | cwm-rust extra |
@@ -422,29 +432,106 @@ These were in the original gap analysis but are now confirmed implemented:
 
 ### ❌ Remaining Gaps
 
+#### High Priority (Functionality)
+
+| Gap | Priority | Effort | Notes |
+|-----|----------|--------|-------|
+| `log:findall` | High | Medium | ✅ FIXED - Collects all bindings from pattern matching |
+| `log:collectAllIn` | High | Medium | ✅ FIXED - Full implementation with pattern matching |
+| `log:forAllIn` | Medium | Medium | ✅ FIXED - Universal quantification over formulas |
+| `log:forAllInClosure` | Medium | Medium | Scoped universal quantification with closure |
+| `time:parse` | Medium | Low | ✅ FIXED - Parses time string with strftime format |
+| `time:parseToSeconds` | Medium | Low | ✅ FIXED - Parses time to epoch seconds |
+
+#### Medium Priority (N3 Syntax)
+
+| Gap | Priority | Effort | Notes |
+|-----|----------|--------|-------|
+| N3 path syntax (`!`) | Medium | Medium | Forward path: `x!p` means "x's p" |
+| N3 path syntax (`^`) | Medium | Medium | Backward path: `x^p` means "something with p of x" |
+
+#### Closure Flags (--closure=)
+
+| Flag | Status | Notes |
+|------|--------|-------|
+| `i` | ✅ | Follow owl:imports |
+| `r` | ✅ | Follow doc:rules |
+| `e` | ❌ | Equality smushing (merge owl:sameAs nodes) |
+| `s` | ❌ | Subject lookup closure |
+| `p` | ❌ | Predicate lookup closure |
+| `o` | ❌ | Object lookup closure |
+| `t` | ❌ | Type statement closure |
+| `E` | ❌ | Ignore errors during closure |
+| `n` | ❌ | Normalize IRIs to URIs |
+| `T` | ❌ | Load truth formulae |
+
+#### Low Priority
+
 | Gap | Priority | Effort | Notes |
 |-----|----------|--------|-------|
 | `--engine=otter` | Low | High | Alternate reasoning engine (specialized) |
 | Native RDF/XML parser | Low | High | Currently only N3/Turtle input; RDF/XML output works |
+| Equality smushing | Low | Medium | Merge nodes with owl:sameAs during reasoning |
 
 ## Recommendations
 
+### ✅ Completed in this Update
+
+1. **`log:findall` predicate** - ✅ IMPLEMENTED
+   - Supports 3-element form: `(template pattern scope) log:findall list`
+   - Supports 2-element form: `(template scope) log:findall list`
+   - Uses unification to collect all matching bindings
+
+2. **`time:parse` and `time:parseToSeconds`** - ✅ IMPLEMENTED
+   - Parse datetime strings with strftime-style format specifiers
+   - Supports %Y, %m, %d, %H, %M, %S, %z format codes
+
+### Next Steps (v0.2.0)
+
+1. **N3 path syntax** - Add `!` and `^` operators to N3 parser
+   - Expand to blank node statements during parsing
+   - Example: `:joe!fam:mother` → `_:b1 . :joe fam:mother _:b1 .`
+
+### Medium-term (v0.3.0)
+
+2. **Closure flags completion** - Add remaining flags:
+   - `e` for equality smushing (owl:sameAs)
+   - `s/p/o/t` for term-based closure
+   - `E` for error handling
+
+3. **`log:collectAllIn`** and **`log:forAllIn`** - Full implementation with reasoner integration
+
 ### Future Consideration
 
-1. **Native RDF/XML parser** - Would allow reading `.rdf` files directly. Currently the system can output RDF/XML but reads N3/Turtle.
+4. **Native RDF/XML parser** - Would allow reading `.rdf` files directly
 
-2. **Otter engine integration** - Specialized use case for first-order logic proving. Low priority unless specific need arises.
+5. **Otter engine integration** - Specialized use case for first-order logic proving
 
 ## Conclusion
 
 cwm-rust significantly exceeds the original CWM in built-in predicate coverage (+150 predicates) and SPARQL support (full SPARQL 1.1 including property paths, aggregates, and subqueries).
 
-**All high-priority gaps have been addressed:**
+**Previously addressed gaps:**
 - ✅ `--crypto` flag is now properly enforced
 - ✅ `log:definitiveDocument` and `log:definitiveService` are implemented
 - ✅ `crypto:publicKey` predicate is implemented
 - ✅ `--language`, `--mode`, and `--revision` flags are fully functional
+- ✅ `log:findall` predicate is now implemented
+- ✅ `time:parse` and `time:parseToSeconds` are now implemented
+- ✅ `log:collectAllIn` - Full implementation with pattern matching
+- ✅ `log:forAllIn` - Universal quantification over formulas
+- ✅ SWAP predicates: `log:merge`, `log:copy`, `log:filter`, `log:reject`, `log:difference`, `log:intersection`, `log:tripleCount`, `log:becomes`
 
-The remaining gaps are low priority (RDF/XML parser, Otter engine) and do not affect typical N3 reasoning workflows.
+**N3QL Support:**
+- ✅ `--query` flag for N3QL pattern matching queries
+- ✅ Rule-based query execution with forward chaining
+- ✅ Pattern matching with variables
+- ✅ Scoped Negation As Failure (SNAF) via `log:notIncludes`
 
-The implementation is highly compatible with original CWM for all common use cases.
+**Remaining gaps (December 2025):**
+- N3 path syntax (`!` and `^`) - Forward/backward path traversal
+- Closure flags (`e`, `s`, `p`, `o`, `t`) - Extended closure operations
+- Equality smushing - Merging owl:sameAs nodes
+- `log:forAllInClosure` - Scoped universal quantification with closure
+
+The implementation remains highly compatible with original CWM for common use cases. The newly identified gaps are primarily advanced meta-programming features and specialized closure operations.

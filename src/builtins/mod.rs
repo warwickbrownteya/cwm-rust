@@ -33,7 +33,7 @@ use sha1::Sha1;
 use md5::Md5;
 use hmac::{Hmac, Mac};
 use base64::{Engine as _, engine::general_purpose};
-use crate::term::{Term, Bindings, uri::ns, FormulaRef};
+use crate::term::{Term, Triple, Variable, Bindings, uri::ns, FormulaRef};
 use crate::parser;
 
 // Re-export ureq for web fetching
@@ -2274,13 +2274,118 @@ impl BuiltinRegistry {
 
         // log:notIncludes already implemented above
 
-        // log:collectAllIn - Collect all matching bindings
-        self.register(&format!("{}collectAllIn", ns::LOG), |subject, object, bindings| {
-            // Placeholder: pattern matching not directly implementable here
-            // Would need reasoner integration
-            if let (Term::Formula(_), Term::Formula(_)) = (subject, object) {
-                return BuiltinResult::Success(bindings.clone());
+        // log:findall - (template pattern scope) log:findall list
+        // Finds all bindings of template where pattern matches triples in scope
+        //
+        // Usage forms:
+        // 1. (template pattern scope) log:findall ?list
+        //    - template: term/list with variables to extract
+        //    - pattern: triple pattern to match (with variables)
+        //    - scope: formula to search in
+        //
+        // 2. (template scope) log:findall ?list
+        //    - template: term/list with variables to extract
+        //    - scope: formula containing data to search
+        //
+        // Example:
+        //   (?person { ?person a :Person } { :alice a :Person . :bob a :Person })
+        //       log:findall (:alice :bob) .
+        self.register(&format!("{}findall", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+
+                // Try 3-element form: (template pattern scope)
+                if items.len() == 3 {
+                    let template = &items[0];
+                    let pattern = &items[1];
+                    let scope = &items[2];
+
+                    if let (Term::Formula(pattern_formula), Term::Formula(scope_formula)) = (pattern, scope) {
+                        // Find all bindings where pattern matches scope
+                        let results = find_all_bindings(template, pattern_formula, scope_formula);
+                        return match_or_bind_list(object, results, bindings);
+                    }
+                }
+
+                // Try 2-element form: (template scope)
+                // In this form, scope contains both pattern variables and data
+                if items.len() == 2 {
+                    let template = &items[0];
+                    let scope = &items[1];
+
+                    if let Term::Formula(scope_formula) = scope {
+                        // Extract template variables from scope triples
+                        let results = find_all_in_scope(template, scope_formula);
+                        return match_or_bind_list(object, results, bindings);
+                    }
+                }
             }
+
+            // Single formula form: { pattern } log:findall ?list
+            // Returns all variable binding sets as a list
+            if let Term::Formula(formula) = subject {
+                let results = extract_all_bindings_from_formula(formula);
+                return match_or_bind_list(object, results, bindings);
+            }
+
+            BuiltinResult::NotReady
+        });
+
+        // log:collectAllIn - (pattern formula) log:collectAllIn bindingsList
+        // Collects all variable bindings where pattern matches triples in formula
+        //
+        // Usage: (?x { ?x a :Person } { :alice a :Person . :bob a :Person }) log:collectAllIn ?list
+        // Returns: list of all bindings { ?x -> :alice }, { ?x -> :bob }
+        //
+        // Similar to log:findall but returns bindings as formula graphs
+        self.register(&format!("{}collectAllIn", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() >= 2 {
+                    // Extract template and scope
+                    let template = &items[0];
+                    let scope = if items.len() == 3 {
+                        // (template pattern scope) form
+                        &items[2]
+                    } else {
+                        // (template scope) form - pattern is in scope
+                        &items[1]
+                    };
+
+                    if let Term::Formula(scope_formula) = scope {
+                        // If there's a separate pattern formula
+                        if items.len() == 3 {
+                            if let Term::Formula(pattern_formula) = &items[1] {
+                                // Find all bindings where pattern matches scope
+                                let results = find_all_bindings(template, pattern_formula, scope_formula);
+                                // Convert to formula list (each binding as a formula)
+                                let binding_formulas: Vec<Term> = results.iter().map(|t| {
+                                    // Create a formula containing just this binding
+                                    let triple = Triple::new(
+                                        template.clone(),
+                                        Term::uri("http://www.w3.org/2002/07/owl#sameAs"),
+                                        t.clone(),
+                                    );
+                                    Term::Formula(FormulaRef::new(0, vec![triple]))
+                                }).collect();
+                                return match_or_bind_list(object, binding_formulas, bindings);
+                            }
+                        } else {
+                            // Simple form: extract all values from scope
+                            let results = find_all_in_scope(template, scope_formula);
+                            return match_or_bind_list(object, results, bindings);
+                        }
+                    }
+                }
+            }
+
+            // Direct formula form: formula log:collectAllIn list
+            // Returns all ground terms from the formula
+            if let Term::Formula(formula) = subject {
+                let results = extract_all_bindings_from_formula(formula);
+                return match_or_bind_list(object, results, bindings);
+            }
+
             BuiltinResult::NotReady
         });
 
@@ -2535,13 +2640,40 @@ impl BuiltinRegistry {
         });
 
         // log:forAllIn - (formula pattern) log:forAllIn true
-        // Succeeds if pattern matches all triples in formula
+        // Succeeds if pattern matches ALL triples in formula
+        //
+        // Usage: ({ :a :p :b . :c :p :d } { ?x :p ?y }) log:forAllIn true
+        // Succeeds because all triples in the first formula match the pattern ?x :p ?y
+        //
+        // This is the universal quantification check: "for all triples T in formula, T matches pattern"
         self.register(&format!("{}forAllIn", ns::LOG), |subject, _object, _bindings| {
             if let Term::List(list) = subject {
                 let items = list.to_vec();
                 if items.len() == 2 {
-                    if let Term::Formula(_formula) = &items[0] {
-                        // Placeholder: would need pattern matching
+                    if let (Term::Formula(formula), Term::Formula(pattern)) = (&items[0], &items[1]) {
+                        let formula_triples = formula.triples();
+                        let pattern_triples = pattern.triples();
+
+                        // If pattern is empty, succeed (vacuously true)
+                        if pattern_triples.is_empty() {
+                            return BuiltinResult::Success(Bindings::default());
+                        }
+
+                        // For each triple in formula, check if it matches at least one pattern
+                        for data_triple in formula_triples {
+                            let mut matched = false;
+                            for pattern_triple in pattern_triples {
+                                if pattern_matches(pattern_triple, data_triple) {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            if !matched {
+                                return BuiltinResult::Failure;
+                            }
+                        }
+
+                        // All triples matched
                         return BuiltinResult::Success(Bindings::default());
                     }
                 }
@@ -2759,6 +2891,211 @@ impl BuiltinRegistry {
                 }
             }
             BuiltinResult::Failure
+        });
+
+        // log:merge - formulaList log:merge mergedFormula
+        // Merges multiple formulas into one (like conjunction but flattens nested formulas)
+        // Usage: ({ :a :p :b } { :c :q :d }) log:merge ?merged
+        self.register(&format!("{}merge", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let mut all_triples = Vec::new();
+                for item in list.iter() {
+                    match item {
+                        Term::Formula(formula) => {
+                            all_triples.extend(formula.triples().to_vec());
+                        }
+                        _ => return BuiltinResult::NotReady,
+                    }
+                }
+                let result = Term::Formula(FormulaRef::new(0, all_triples));
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), result);
+                    return BuiltinResult::Success(new_bindings);
+                } else if let Term::Formula(obj_formula) = object {
+                    if let Term::Formula(res_formula) = &result {
+                        if res_formula.triples() == obj_formula.triples() {
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:becomes - (oldTerm newTerm) log:becomes substitutionPair
+        // Creates a substitution mapping from old to new
+        // Used with formulas to apply renaming/substitution
+        self.register(&format!("{}becomes", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    // Just return the pair as-is
+                    if let Term::Variable(var) = object {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(var.clone(), subject.clone());
+                        return BuiltinResult::Success(new_bindings);
+                    } else if subject == object {
+                        return BuiltinResult::Success(bindings.clone());
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:copy - formula log:copy copiedFormula
+        // Creates a deep copy of a formula with fresh blank nodes
+        self.register(&format!("{}copy", ns::LOG), |subject, object, bindings| {
+            if let Term::Formula(formula) = subject {
+                // Create a copy with same triples (blank nodes are already shared)
+                let copied = Term::Formula(FormulaRef::new(0, formula.triples().to_vec()));
+                if let Term::Variable(var) = object {
+                    let mut new_bindings = bindings.clone();
+                    new_bindings.insert(var.clone(), copied);
+                    return BuiltinResult::Success(new_bindings);
+                } else if &copied == object {
+                    return BuiltinResult::Success(bindings.clone());
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:tripleCount - formula log:tripleCount count
+        // Returns the number of triples in a formula
+        self.register(&format!("{}tripleCount", ns::LOG), |subject, object, bindings| {
+            if let Term::Formula(formula) = subject {
+                let count = formula.triples().len() as f64;
+                return match_or_bind(object, count, bindings);
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:filter - (formula pattern) log:filter filteredFormula
+        // Returns only triples from formula that match pattern
+        self.register(&format!("{}filter", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Term::Formula(formula), Term::Formula(pattern)) = (&items[0], &items[1]) {
+                        let formula_triples = formula.triples();
+                        let pattern_triples = pattern.triples();
+
+                        let mut matching_triples = Vec::new();
+                        for data_triple in formula_triples {
+                            for pattern_triple in pattern_triples {
+                                if pattern_matches(pattern_triple, data_triple) {
+                                    if !matching_triples.contains(data_triple) {
+                                        matching_triples.push(data_triple.clone());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        let result = Term::Formula(FormulaRef::new(0, matching_triples));
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:reject - (formula pattern) log:reject filteredFormula
+        // Returns only triples from formula that do NOT match pattern
+        self.register(&format!("{}reject", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Term::Formula(formula), Term::Formula(pattern)) = (&items[0], &items[1]) {
+                        let formula_triples = formula.triples();
+                        let pattern_triples = pattern.triples();
+
+                        let mut non_matching_triples = Vec::new();
+                        for data_triple in formula_triples {
+                            let mut matches = false;
+                            for pattern_triple in pattern_triples {
+                                if pattern_matches(pattern_triple, data_triple) {
+                                    matches = true;
+                                    break;
+                                }
+                            }
+                            if !matches {
+                                non_matching_triples.push(data_triple.clone());
+                            }
+                        }
+
+                        let result = Term::Formula(FormulaRef::new(0, non_matching_triples));
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:difference - (formula1 formula2) log:difference resultFormula
+        // Returns triples in formula1 but not in formula2
+        self.register(&format!("{}difference", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Term::Formula(formula1), Term::Formula(formula2)) = (&items[0], &items[1]) {
+                        let triples1 = formula1.triples();
+                        let triples2: std::collections::HashSet<_> = formula2.triples().iter().collect();
+
+                        let mut diff_triples = Vec::new();
+                        for triple in triples1 {
+                            if !triples2.contains(triple) {
+                                diff_triples.push(triple.clone());
+                            }
+                        }
+
+                        let result = Term::Formula(FormulaRef::new(0, diff_triples));
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // log:intersection - (formula1 formula2) log:intersection resultFormula
+        // Returns triples that are in both formulas
+        self.register(&format!("{}intersection", ns::LOG), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Term::Formula(formula1), Term::Formula(formula2)) = (&items[0], &items[1]) {
+                        let triples1: std::collections::HashSet<_> = formula1.triples().iter().collect();
+                        let triples2 = formula2.triples();
+
+                        let mut intersect_triples = Vec::new();
+                        for triple in triples2 {
+                            if triples1.contains(triple) {
+                                intersect_triples.push(triple.clone());
+                            }
+                        }
+
+                        let result = Term::Formula(FormulaRef::new(0, intersect_triples));
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), result);
+                            return BuiltinResult::Success(new_bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
         });
     }
 
@@ -4034,6 +4371,51 @@ impl BuiltinRegistry {
             }
             BuiltinResult::Failure
         });
+
+        // time:parse - (dateTimeString formatString) time:parse isoDateTime
+        // Parses a datetime string according to a format pattern and returns ISO 8601 datetime
+        //
+        // Format patterns (strftime-style):
+        //   %Y - 4-digit year
+        //   %m - 2-digit month (01-12)
+        //   %d - 2-digit day (01-31)
+        //   %H - 2-digit hour (00-23)
+        //   %M - 2-digit minute (00-59)
+        //   %S - 2-digit second (00-59)
+        //   %z - timezone offset (+/-HHMM)
+        //
+        // Example: ("2024-12-25 14:30:00" "%Y-%m-%d %H:%M:%S") time:parse "2024-12-25T14:30:00Z"
+        self.register(&format!("{}parse", ns::TIME), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(input), Some(fmt)) = (get_string(&items[0]), get_string(&items[1])) {
+                        if let Some(dt) = parse_datetime_with_format(&input, &fmt) {
+                            return match_or_bind_string(object, dt.to_rfc3339(), bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // time:parseToSeconds - (dateTimeString formatString) time:parseToSeconds secondsSinceEpoch
+        // Parses a datetime string according to a format pattern and returns Unix timestamp
+        //
+        // Example: ("2024-12-25 14:30:00" "%Y-%m-%d %H:%M:%S") time:parseToSeconds 1735135800
+        self.register(&format!("{}parseToSeconds", ns::TIME), |subject, object, bindings| {
+            if let Term::List(list) = subject {
+                let items = list.to_vec();
+                if items.len() == 2 {
+                    if let (Some(input), Some(fmt)) = (get_string(&items[0]), get_string(&items[1])) {
+                        if let Some(dt) = parse_datetime_with_format(&input, &fmt) {
+                            return match_or_bind(object, dt.timestamp() as f64, bindings);
+                        }
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
     }
 
     fn register_crypto(&mut self) {
@@ -4809,6 +5191,423 @@ fn match_or_bind_string(object: &Term, value: String, bindings: &Bindings) -> Bu
             }
         }
         _ => BuiltinResult::Failure,
+    }
+}
+
+/// Match a list against an object or bind it
+fn match_or_bind_list(object: &Term, items: Vec<Term>, bindings: &Bindings) -> BuiltinResult {
+    match object {
+        Term::Variable(var) => {
+            let mut new_bindings = bindings.clone();
+            new_bindings.insert(var.clone(), Term::list(items));
+            BuiltinResult::Success(new_bindings)
+        }
+        Term::List(list) => {
+            let obj_items = list.to_vec();
+            if obj_items == items {
+                BuiltinResult::Success(bindings.clone())
+            } else {
+                BuiltinResult::Failure
+            }
+        }
+        _ => BuiltinResult::Failure,
+    }
+}
+
+// ============================================================================
+// time:parse Helper Functions
+// ============================================================================
+
+/// Parse a datetime string using a strftime-style format
+///
+/// Supports common format specifiers:
+/// - %Y: 4-digit year
+/// - %m: 2-digit month (01-12)
+/// - %d: 2-digit day (01-31)
+/// - %H: 2-digit hour (00-23)
+/// - %M: 2-digit minute (00-59)
+/// - %S: 2-digit second (00-59)
+/// - %z: timezone offset (+/-HHMM)
+fn parse_datetime_with_format(input: &str, format: &str) -> Option<DateTime<chrono::FixedOffset>> {
+    use chrono::NaiveDateTime;
+
+    // Build a regex pattern from the format string
+    let mut pattern = String::new();
+    let mut captures: Vec<&str> = Vec::new();
+    let mut chars = format.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let Some(&spec) = chars.peek() {
+                chars.next();
+                match spec {
+                    'Y' => {
+                        pattern.push_str(r"(\d{4})");
+                        captures.push("year");
+                    }
+                    'm' => {
+                        pattern.push_str(r"(\d{2})");
+                        captures.push("month");
+                    }
+                    'd' => {
+                        pattern.push_str(r"(\d{2})");
+                        captures.push("day");
+                    }
+                    'H' => {
+                        pattern.push_str(r"(\d{2})");
+                        captures.push("hour");
+                    }
+                    'M' => {
+                        pattern.push_str(r"(\d{2})");
+                        captures.push("minute");
+                    }
+                    'S' => {
+                        pattern.push_str(r"(\d{2})");
+                        captures.push("second");
+                    }
+                    'z' => {
+                        pattern.push_str(r"([+-]\d{4})");
+                        captures.push("tz");
+                    }
+                    '%' => {
+                        pattern.push('%');
+                    }
+                    _ => {
+                        pattern.push('%');
+                        pattern.push(spec);
+                    }
+                }
+            }
+        } else {
+            // Escape special regex characters
+            if "[]{}()*+?.\\^$|".contains(c) {
+                pattern.push('\\');
+            }
+            pattern.push(c);
+        }
+    }
+
+    let re = Regex::new(&format!("^{}$", pattern)).ok()?;
+    let caps = re.captures(input)?;
+
+    let mut year = 1970;
+    let mut month = 1u32;
+    let mut day = 1u32;
+    let mut hour = 0u32;
+    let mut minute = 0u32;
+    let mut second = 0u32;
+    let mut tz_offset_secs = 0i32;
+
+    for (i, cap_name) in captures.iter().enumerate() {
+        let value = caps.get(i + 1)?.as_str();
+        match *cap_name {
+            "year" => year = value.parse().ok()?,
+            "month" => month = value.parse().ok()?,
+            "day" => day = value.parse().ok()?,
+            "hour" => hour = value.parse().ok()?,
+            "minute" => minute = value.parse().ok()?,
+            "second" => second = value.parse().ok()?,
+            "tz" => {
+                // Parse timezone offset like +0530 or -0800
+                let sign = if value.starts_with('-') { -1 } else { 1 };
+                let hours: i32 = value[1..3].parse().ok()?;
+                let mins: i32 = value[3..5].parse().ok()?;
+                tz_offset_secs = sign * (hours * 3600 + mins * 60);
+            }
+            _ => {}
+        }
+    }
+
+    let offset = chrono::FixedOffset::east_opt(tz_offset_secs)?;
+    let naive = NaiveDateTime::new(
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?,
+        chrono::NaiveTime::from_hms_opt(hour, minute, second)?,
+    );
+
+    Some(naive.and_local_timezone(offset).single()?)
+}
+
+// ============================================================================
+// log:findall Helper Functions
+// ============================================================================
+
+/// Try to unify a pattern term with a data term, collecting bindings
+fn unify_term(pattern: &Term, data: &Term, bindings: &mut Bindings) -> bool {
+    match pattern {
+        Term::Variable(var) => {
+            // Check if variable is already bound
+            if let Some(existing) = bindings.get(var) {
+                // Must match existing binding
+                existing == data
+            } else {
+                // Bind the variable
+                bindings.insert(var.clone(), data.clone());
+                true
+            }
+        }
+        Term::Uri(uri1) => {
+            if let Term::Uri(uri2) = data {
+                uri1.as_str() == uri2.as_str()
+            } else {
+                false
+            }
+        }
+        Term::Literal(lit1) => {
+            if let Term::Literal(lit2) = data {
+                lit1.value() == lit2.value() && lit1.datatype() == lit2.datatype()
+            } else {
+                false
+            }
+        }
+        Term::BlankNode(bn1) => {
+            if let Term::BlankNode(bn2) = data {
+                bn1.label() == bn2.label()
+            } else {
+                false
+            }
+        }
+        Term::List(list1) => {
+            if let Term::List(list2) = data {
+                if list1.len() != list2.len() {
+                    return false;
+                }
+                for (p, d) in list1.iter().zip(list2.iter()) {
+                    if !unify_term(p, d, bindings) {
+                        return false;
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        }
+        Term::Formula(f1) => {
+            if let Term::Formula(f2) = data {
+                if f1.triples().len() != f2.triples().len() {
+                    return false;
+                }
+                // Check each triple
+                for (t1, t2) in f1.triples().iter().zip(f2.triples().iter()) {
+                    let mut temp_bindings = bindings.clone();
+                    if !unify_triple(t1, t2, &mut temp_bindings) {
+                        return false;
+                    }
+                    *bindings = temp_bindings;
+                }
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Try to unify a pattern triple with a data triple
+fn unify_triple(pattern: &Triple, data: &Triple, bindings: &mut Bindings) -> bool {
+    unify_term(&pattern.subject, &data.subject, bindings) &&
+    unify_term(&pattern.predicate, &data.predicate, bindings) &&
+    unify_term(&pattern.object, &data.object, bindings)
+}
+
+/// Substitute variables in a term with their bindings
+fn substitute_term(term: &Term, bindings: &Bindings) -> Term {
+    match term {
+        Term::Variable(var) => {
+            if let Some(value) = bindings.get(var) {
+                value.clone()
+            } else {
+                term.clone()
+            }
+        }
+        Term::List(list) => {
+            let items: Vec<Term> = list.iter()
+                .map(|t| substitute_term(t, bindings))
+                .collect();
+            Term::list(items)
+        }
+        Term::Formula(formula) => {
+            let triples: Vec<Triple> = formula.triples().iter()
+                .map(|t| Triple::new(
+                    substitute_term(&t.subject, bindings),
+                    substitute_term(&t.predicate, bindings),
+                    substitute_term(&t.object, bindings),
+                ))
+                .collect();
+            Term::Formula(FormulaRef::new(formula.id(), triples))
+        }
+        _ => term.clone(),
+    }
+}
+
+/// Find all bindings where pattern matches scope, return list of template instances
+///
+/// For (template pattern scope) log:findall list
+fn find_all_bindings(template: &Term, pattern: &FormulaRef, scope: &FormulaRef) -> Vec<Term> {
+    let pattern_triples = pattern.triples();
+    let scope_triples = scope.triples();
+    let mut results = Vec::new();
+
+    // If pattern has one triple, find all matches
+    if pattern_triples.len() == 1 {
+        let pattern_triple = &pattern_triples[0];
+        for data_triple in scope_triples {
+            let mut bindings = Bindings::default();
+            if unify_triple(pattern_triple, data_triple, &mut bindings) {
+                let result = substitute_term(template, &bindings);
+                if !results.contains(&result) {
+                    results.push(result);
+                }
+            }
+        }
+    } else if !pattern_triples.is_empty() {
+        // Multiple pattern triples - need to find bindings that match all
+        // Use backtracking search
+        let all_bindings = match_patterns_recursive(&pattern_triples, scope_triples, 0, Bindings::default());
+        for bindings in all_bindings {
+            let result = substitute_term(template, &bindings);
+            if !results.contains(&result) {
+                results.push(result);
+            }
+        }
+    }
+
+    results
+}
+
+/// Recursively match multiple pattern triples against scope
+fn match_patterns_recursive(
+    patterns: &[Triple],
+    scope: &[Triple],
+    index: usize,
+    current_bindings: Bindings,
+) -> Vec<Bindings> {
+    if index >= patterns.len() {
+        return vec![current_bindings];
+    }
+
+    let pattern = &patterns[index];
+    let mut all_results = Vec::new();
+
+    for data_triple in scope {
+        let mut bindings = current_bindings.clone();
+        if unify_triple(pattern, data_triple, &mut bindings) {
+            let sub_results = match_patterns_recursive(patterns, scope, index + 1, bindings);
+            all_results.extend(sub_results);
+        }
+    }
+
+    all_results
+}
+
+/// Find all values matching template in scope formula
+///
+/// For (template scope) log:findall list - extracts template bindings from scope
+fn find_all_in_scope(template: &Term, scope: &FormulaRef) -> Vec<Term> {
+    let mut results = Vec::new();
+    let scope_triples = scope.triples();
+
+    // Collect all variables from template
+    let template_vars = collect_variables(template);
+
+    // For each triple in scope, extract variable bindings
+    for triple in scope_triples {
+        let mut bindings = Bindings::default();
+
+        // Try to find variables in subject, predicate, object
+        extract_bindings_from_term(&triple.subject, &template_vars, &mut bindings);
+        extract_bindings_from_term(&triple.predicate, &template_vars, &mut bindings);
+        extract_bindings_from_term(&triple.object, &template_vars, &mut bindings);
+
+        // If we got bindings, substitute template
+        if !bindings.is_empty() {
+            let result = substitute_term(template, &bindings);
+            if !results.contains(&result) {
+                results.push(result);
+            }
+        }
+    }
+
+    results
+}
+
+/// Collect all variables from a term
+fn collect_variables(term: &Term) -> Vec<Variable> {
+    let mut vars = Vec::new();
+    collect_variables_inner(term, &mut vars);
+    vars
+}
+
+fn collect_variables_inner(term: &Term, vars: &mut Vec<Variable>) {
+    match term {
+        Term::Variable(var) => {
+            if !vars.contains(var) {
+                vars.push(var.clone());
+            }
+        }
+        Term::List(list) => {
+            for item in list.iter() {
+                collect_variables_inner(item, vars);
+            }
+        }
+        Term::Formula(formula) => {
+            for triple in formula.triples() {
+                collect_variables_inner(&triple.subject, vars);
+                collect_variables_inner(&triple.predicate, vars);
+                collect_variables_inner(&triple.object, vars);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract bindings from a term if it matches template variables
+fn extract_bindings_from_term(term: &Term, template_vars: &[Variable], _bindings: &mut Bindings) {
+    if let Term::Variable(var) = term {
+        // If this variable is in our template, bind it to itself (it's already the value)
+        if template_vars.iter().any(|v| v.name() == var.name()) {
+            // In scope, variables represent themselves as values
+            // This is used when scope contains ground data and we extract matching values
+        }
+    }
+    // For ground terms, we don't extract - template vars must match against data
+}
+
+/// Extract all unique bindings from a formula (for { pattern } log:findall list)
+/// Returns list of all ground terms found where template variables occur
+fn extract_all_bindings_from_formula(formula: &FormulaRef) -> Vec<Term> {
+    let mut results = Vec::new();
+
+    // Collect all unique terms from formula triples
+    for triple in formula.triples() {
+        add_unique_term(&triple.subject, &mut results);
+        add_unique_term(&triple.object, &mut results);
+    }
+
+    results
+}
+
+/// Add a term to results if it's ground and not already present
+fn add_unique_term(term: &Term, results: &mut Vec<Term>) {
+    match term {
+        Term::Variable(_) => {} // Skip variables
+        Term::Uri(_) | Term::Literal(_) | Term::BlankNode(_) => {
+            if !results.contains(term) {
+                results.push(term.clone());
+            }
+        }
+        Term::List(list) => {
+            // Check if all elements are ground
+            if list.iter().all(|t| !matches!(t, Term::Variable(_))) {
+                if !results.contains(term) {
+                    results.push(term.clone());
+                }
+            }
+        }
+        Term::Formula(_) => {
+            if !results.contains(term) {
+                results.push(term.clone());
+            }
+        }
     }
 }
 
