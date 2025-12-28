@@ -61,6 +61,7 @@ pub mod reasoner;
 pub mod reasoning;
 pub mod builtins;
 pub mod sparql;
+pub mod fuseki;
 
 // Re-export core traits and types
 pub use crate::core::{

@@ -12,6 +12,8 @@ use clap::{Parser, ValueEnum};
 use indexmap::IndexMap;
 
 use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule, List};
+use cwm::fuseki::FusekiStoreBuilder;
+use cwm::core::TripleStore;
 
 /// N3 output formatting options
 #[derive(Default, Clone)]
@@ -315,6 +317,22 @@ struct Cli {
     /// Output revision/version information
     #[arg(long)]
     revision: bool,
+
+    /// Use Fuseki SPARQL endpoint as backend store
+    #[arg(long = "fuseki", value_name = "URL")]
+    fuseki_endpoint: Option<String>,
+
+    /// Fuseki graph URI (default: default graph)
+    #[arg(long = "fuseki-graph", value_name = "URI")]
+    fuseki_graph: Option<String>,
+
+    /// Fuseki connection timeout in seconds (default: 30)
+    #[arg(long = "fuseki-timeout", value_name = "SECS", default_value = "30")]
+    fuseki_timeout: u64,
+
+    /// Batch size for Fuseki bulk operations (default: 1000)
+    #[arg(long = "fuseki-batch", value_name = "SIZE", default_value = "1000")]
+    fuseki_batch: usize,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -399,6 +417,37 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
 
     let mut store = Store::new();
+
+    // If Fuseki endpoint specified, load existing data from it
+    let fuseki_store = if let Some(ref endpoint) = cli.fuseki_endpoint {
+        if !cli.quiet && cli.verbose {
+            eprintln!("Connecting to Fuseki endpoint: {}", endpoint);
+        }
+        let mut builder = FusekiStoreBuilder::new(endpoint.clone())
+            .timeout(cli.fuseki_timeout)
+            .batch_size(cli.fuseki_batch);
+
+        if let Some(ref graph) = cli.fuseki_graph {
+            builder = builder.graph(graph.clone());
+        }
+
+        let fuseki = builder.build()
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Fuseki: {}", e))?;
+
+        // Load existing triples from Fuseki into local store
+        let existing = fuseki.load_all()
+            .map_err(|e| anyhow::anyhow!("Failed to load from Fuseki: {}", e))?;
+
+        if !cli.quiet && cli.verbose {
+            eprintln!("Loaded {} triples from Fuseki", existing.len());
+        }
+
+        store.add_all(existing);
+        Some(fuseki)
+    } else {
+        None
+    };
+
     store.add_all(parse_result.triples.clone());
     all_prefixes.extend(parse_result.prefixes.clone());
     all_rules.extend(parse_result.rules.clone());
@@ -760,6 +809,28 @@ fn main() -> Result<()> {
             OutputFormat::Debug => format!("{:?}", output_store),
         }
     };
+
+    // Sync results back to Fuseki if connected
+    if let Some(mut fuseki) = fuseki_store {
+        if !cli.quiet && cli.verbose {
+            eprintln!("Syncing {} triples to Fuseki", output_store.len());
+        }
+
+        // Clear existing data and push new results
+        fuseki.clear_graph()
+            .map_err(|e| anyhow::anyhow!("Failed to clear Fuseki graph: {}", e))?;
+
+        for triple in output_store.iter() {
+            fuseki.add(triple.clone());
+        }
+
+        fuseki.flush()
+            .map_err(|e| anyhow::anyhow!("Failed to flush to Fuseki: {}", e))?;
+
+        if !cli.quiet && cli.verbose {
+            eprintln!("Successfully synced to Fuseki");
+        }
+    }
 
     // Write output
     if let Some(output_path) = cli.output {
