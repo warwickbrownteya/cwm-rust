@@ -1,0 +1,131 @@
+# SWAP Compliance Test: log: namespace
+# Tests all log built-in predicates from W3C CWM/SWAP
+
+@prefix log: <http://www.w3.org/2000/10/swap/log#>.
+@prefix : <http://example.org/test#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
+
+# ============================================
+# URI AND RESOURCE FUNCTIONS
+# ============================================
+
+# log:uri - get URI as string
+{ <http://example.org/foo> log:uri ?result } => { :uri_test1 :result ?result }. # "http://example.org/foo"
+{ :localName log:uri ?result } => { :uri_test2 :result ?result }. # Contains "localName"
+
+# log:racine - remove fragment from URI
+{ <http://example.org/doc#section1> log:racine ?result } => { :racine_test1 :result ?result }. # <http://example.org/doc>
+{ <http://example.org/doc#foo> log:racine ?result } => { :racine_test2 :result ?result }.
+
+# ============================================
+# EQUALITY AND COMPARISON
+# ============================================
+
+# log:equalTo - RDF node identity
+{ :foo log:equalTo :foo } => { :logEq_test1 :passed true }.
+{ "hello" log:equalTo "hello" } => { :logEq_test2 :passed true }.
+{ 42 log:equalTo 42 } => { :logEq_test3 :passed true }.
+{ :foo log:equalTo :bar } => { :logEq_test4 :passed true }. # Should NOT fire
+
+# log:notEqualTo - negated identity
+{ :foo log:notEqualTo :bar } => { :logNeq_test1 :passed true }.
+{ "hello" log:notEqualTo "world" } => { :logNeq_test2 :passed true }.
+{ 1 log:notEqualTo 2 } => { :logNeq_test3 :passed true }.
+
+# ============================================
+# FORMULA OPERATIONS
+# ============================================
+
+# log:conjunction - merge formulas
+# Note: This test uses inline formulas
+{ { :a :b :c } log:conjunction { :d :e :f } } => { :conj_test1 :passed true }.
+
+# log:n3String - serialize formula to N3
+{ { :subject :predicate :object } log:n3String ?result } => { :n3str_test1 :result ?result }.
+
+# log:parsedAsN3 - parse N3 string to formula
+{ ":a :b :c ." log:parsedAsN3 ?formula } => { :parseN3_test1 :formula ?formula }.
+
+# ============================================
+# INCLUDES AND IMPLICATION
+# ============================================
+
+# log:includes - formula containment
+{ { :a :b :c . :d :e :f } log:includes { :a :b :c } } => { :includes_test1 :passed true }.
+{ { :x :y :z } log:includes { :a :b :c } } => { :includes_test2 :passed true }. # Should NOT fire
+
+# log:notIncludes - negated containment
+{ { :a :b :c } log:notIncludes { :x :y :z } } => { :notIncludes_test1 :passed true }.
+
+# log:implies - rule relationship (this is the core inference mechanism)
+# Testing via actual rule application
+:testSubject :testPred :testObject .
+{ ?s :testPred ?o } => { ?s :inferred true }.
+
+# ============================================
+# CONTENT AND SEMANTICS
+# ============================================
+
+# log:content - get document content as string
+# Note: Requires actual file/URL access
+# { <file:///tmp/test.n3> log:content ?content } => { :content_test1 :content ?content }.
+
+# log:semantics - parse document to formula
+# Note: Requires actual file/URL access
+# { <file:///tmp/test.n3> log:semantics ?formula } => { :semantics_test1 :formula ?formula }.
+
+# log:semanticsOrError - safe parsing with error handling
+# { <file:///tmp/test.n3> log:semanticsOrError ?result } => { :semErr_test1 :result ?result }.
+
+# ============================================
+# TYPE CHECKING
+# ============================================
+
+# log:rawType - get internal type
+{ :resource log:rawType ?type } => { :rawType_test1 :type ?type }. # Other
+{ "literal" log:rawType ?type } => { :rawType_test2 :type ?type }. # Literal
+{ (1 2 3) log:rawType ?type } => { :rawType_test3 :type ?type }. # List
+{ { :a :b :c } log:rawType ?type } => { :rawType_test4 :type ?type }. # Formula
+
+# ============================================
+# DATATYPED LITERALS
+# ============================================
+
+# log:dtlit - create datatyped literal
+{ ("42" <http://www.w3.org/2001/XMLSchema#integer>) log:dtlit ?result } => { :dtlit_test1 :result ?result }.
+{ ("3.14" <http://www.w3.org/2001/XMLSchema#decimal>) log:dtlit ?result } => { :dtlit_test2 :result ?result }.
+{ ("true" <http://www.w3.org/2001/XMLSchema#boolean>) log:dtlit ?result } => { :dtlit_test3 :result ?result }.
+
+# ============================================
+# SKOLEMIZATION AND BINDING
+# ============================================
+
+# log:skolem - create skolem URI from term
+# { _:blank log:skolem ?skolem } => { :skolem_test1 :skolem ?skolem }.
+
+# ============================================
+# OUTPUT AND DEBUGGING
+# ============================================
+
+# log:outputString - output ordered by key
+# { "result" log:outputString "Hello World" } => { :output_test1 :passed true }.
+
+# ============================================
+# CONCLUSION (inference)
+# ============================================
+
+# log:conclusion - derive all conclusions from formula
+# Note: This is a meta-level operation
+# { { :a :type :B . { ?x :type :B } => { ?x :derived true } } log:conclusion ?result }
+#     => { :conclusion_test1 :result ?result }.
+
+# ============================================
+# DEFINITIVE SOURCES
+# ============================================
+
+# log:definitiveDocument - authoritative source for property
+# { <http://example.org/> log:definitiveDocument :someProperty } => { :defDoc_test1 :passed true }.
+
+# log:definitiveService - query endpoint for property
+# { <http://example.org/sparql> log:definitiveService :someProperty } => { :defSvc_test1 :passed true }.

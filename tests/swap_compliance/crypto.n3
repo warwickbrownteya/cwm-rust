@@ -1,0 +1,105 @@
+# SWAP Compliance Test: crypto: namespace
+# Tests all crypto built-in predicates from W3C CWM/SWAP
+
+@prefix crypto: <http://www.w3.org/2000/10/swap/crypto#>.
+@prefix : <http://example.org/test#>.
+
+# ============================================
+# HASH FUNCTIONS
+# ============================================
+
+# crypto:sha - SHA-1 hash (original CWM default)
+{ "hello" crypto:sha ?result } => { :sha1_test1 :result ?result }. # aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
+{ "" crypto:sha ?result } => { :sha1_test2 :result ?result }. # da39a3ee5e6b4b0d3255bfef95601890afd80709
+{ "The quick brown fox" crypto:sha ?result } => { :sha1_test3 :result ?result }.
+
+# crypto:md5 - MD5 hash
+{ "hello" crypto:md5 ?result } => { :md5_test1 :result ?result }. # 5d41402abc4b2a76b9719d911017c592
+{ "" crypto:md5 ?result } => { :md5_test2 :result ?result }. # d41d8cd98f00b204e9800998ecf8427e
+{ "The quick brown fox" crypto:md5 ?result } => { :md5_test3 :result ?result }.
+
+# ============================================
+# EXTENDED HASH FUNCTIONS (cwm-rust extensions)
+# ============================================
+
+# crypto:sha256 - SHA-256 hash
+{ "hello" crypto:sha256 ?result } => { :sha256_test1 :result ?result }.
+# 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+{ "" crypto:sha256 ?result } => { :sha256_test2 :result ?result }.
+# e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+# crypto:sha384 - SHA-384 hash
+{ "hello" crypto:sha384 ?result } => { :sha384_test1 :result ?result }.
+
+# crypto:sha512 - SHA-512 hash
+{ "hello" crypto:sha512 ?result } => { :sha512_test1 :result ?result }.
+# 9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043
+
+# ============================================
+# HMAC FUNCTIONS (extensions)
+# ============================================
+
+# crypto:hmacSha256 - HMAC-SHA256
+{ ("message" "secret") crypto:hmacSha256 ?result } => { :hmac256_test1 :result ?result }.
+
+# crypto:hmacSha512 - HMAC-SHA512
+{ ("message" "secret") crypto:hmacSha512 ?result } => { :hmac512_test1 :result ?result }.
+
+# ============================================
+# DIGITAL SIGNATURES (original CWM)
+# ============================================
+
+# crypto:sign - create digital signature
+# Signature format: [hash, privateKey] -> signature
+# Note: Requires actual key material for real tests
+# { ([:sha "message"] :privateKey) crypto:sign ?signature } => { :sign_test1 :signature ?signature }.
+
+# crypto:verify - verify digital signature
+# Verification: publicKey + [hash, signature] -> boolean
+# { :publicKey crypto:verify ([:sha "message"] :signature) } => { :verify_test1 :passed true }.
+
+# crypto:verifyBoolean - verify returning "1" or "0"
+# { (:keyPair [:sha "message"] :signature) crypto:verifyBoolean ?result } => { :verifyBool_test1 :result ?result }.
+
+# ============================================
+# KEY OPERATIONS (original CWM)
+# ============================================
+
+# crypto:publicKey - extract public key from keypair
+# { :keyPair crypto:publicKey ?pubKey } => { :pubKey_test1 :pubKey ?pubKey }.
+
+# ============================================
+# BASE64 ENCODING (extensions)
+# ============================================
+
+# crypto:base64Encode - encode to base64
+{ "hello" crypto:base64Encode ?result } => { :b64enc_test1 :result ?result }. # aGVsbG8=
+{ "Hello World" crypto:base64Encode ?result } => { :b64enc_test2 :result ?result }. # SGVsbG8gV29ybGQ=
+{ "" crypto:base64Encode ?result } => { :b64enc_test3 :result ?result }. # ""
+
+# crypto:base64Decode - decode from base64
+{ "aGVsbG8=" crypto:base64Decode ?result } => { :b64dec_test1 :result ?result }. # "hello"
+{ "SGVsbG8gV29ybGQ=" crypto:base64Decode ?result } => { :b64dec_test2 :result ?result }. # "Hello World"
+
+# ============================================
+# HEX ENCODING (extensions)
+# ============================================
+
+# crypto:hexEncode - encode to hexadecimal
+{ "hello" crypto:hexEncode ?result } => { :hexenc_test1 :result ?result }. # 68656c6c6f
+{ "AB" crypto:hexEncode ?result } => { :hexenc_test2 :result ?result }. # 4142
+
+# crypto:hexDecode - decode from hexadecimal
+{ "68656c6c6f" crypto:hexDecode ?result } => { :hexdec_test1 :result ?result }. # "hello"
+{ "4142" crypto:hexDecode ?result } => { :hexdec_test2 :result ?result }. # "AB"
+
+# ============================================
+# TYPE CLASSES (original CWM)
+# ============================================
+
+# Note: These are class assertions, not predicates
+# crypto:HashFunction - identifies hash functions
+# crypto:PublicKeyObject - container for keys
+# crypto:CanEncrypt - key can encrypt
+# crypto:CanSign - key can sign
+# crypto:HasPrivate - key contains private material

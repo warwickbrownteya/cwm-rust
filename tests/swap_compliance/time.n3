@@ -1,0 +1,118 @@
+# SWAP Compliance Test: time: namespace
+# Tests all time built-in predicates from W3C CWM/SWAP
+
+@prefix time: <http://www.w3.org/2000/10/swap/time#>.
+@prefix : <http://example.org/test#>.
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+
+# ============================================
+# CURRENT TIME
+# ============================================
+
+# time:gmTime - get current UTC time (format string -> formatted time)
+{ "" time:gmTime ?result } => { :gmTime_test1 :result ?result }. # ISO format
+{ "%Y-%m-%d" time:gmTime ?result } => { :gmTime_test2 :result ?result }. # YYYY-MM-DD
+{ "%H:%M:%S" time:gmTime ?result } => { :gmTime_test3 :result ?result }. # HH:MM:SS
+
+# time:localTime - get current local time with timezone
+{ "" time:localTime ?result } => { :localTime_test1 :result ?result }. # ISO format
+{ "%Y-%m-%d %H:%M:%S" time:localTime ?result } => { :localTime_test2 :result ?result }.
+
+# ============================================
+# DATETIME COMPONENT EXTRACTION
+# ============================================
+
+# Using a fixed datetime string for testing: "2024-06-15T14:30:45-05:00"
+
+# time:year - extract 4-digit year
+{ "2024-06-15T14:30:45-05:00" time:year ?result } => { :year_test1 :result ?result }. # "2024"
+{ "1999-12-31T23:59:59Z" time:year ?result } => { :year_test2 :result ?result }. # "1999"
+{ "2000-01-01T00:00:00Z" time:year ?result } => { :year_test3 :result ?result }. # "2000"
+
+# time:month - extract 2-digit month (01-12)
+{ "2024-06-15T14:30:45-05:00" time:month ?result } => { :month_test1 :result ?result }. # "06"
+{ "2024-01-15T00:00:00Z" time:month ?result } => { :month_test2 :result ?result }. # "01"
+{ "2024-12-31T23:59:59Z" time:month ?result } => { :month_test3 :result ?result }. # "12"
+
+# time:day - extract 2-digit day of month
+{ "2024-06-15T14:30:45-05:00" time:day ?result } => { :day_test1 :result ?result }. # "15"
+{ "2024-01-01T00:00:00Z" time:day ?result } => { :day_test2 :result ?result }. # "01"
+{ "2024-01-31T12:00:00Z" time:day ?result } => { :day_test3 :result ?result }. # "31"
+
+# time:hour - extract 2-digit hour (00-23)
+{ "2024-06-15T14:30:45-05:00" time:hour ?result } => { :hour_test1 :result ?result }. # "14"
+{ "2024-06-15T00:00:00Z" time:hour ?result } => { :hour_test2 :result ?result }. # "00"
+{ "2024-06-15T23:59:59Z" time:hour ?result } => { :hour_test3 :result ?result }. # "23"
+
+# time:minute - extract 2-digit minute (00-59)
+{ "2024-06-15T14:30:45-05:00" time:minute ?result } => { :minute_test1 :result ?result }. # "30"
+{ "2024-06-15T00:00:00Z" time:minute ?result } => { :minute_test2 :result ?result }. # "00"
+{ "2024-06-15T12:59:00Z" time:minute ?result } => { :minute_test3 :result ?result }. # "59"
+
+# time:second - extract 2-digit second (00-59)
+{ "2024-06-15T14:30:45-05:00" time:second ?result } => { :second_test1 :result ?result }. # "45"
+{ "2024-06-15T00:00:00Z" time:second ?result } => { :second_test2 :result ?result }. # "00"
+{ "2024-06-15T12:30:59Z" time:second ?result } => { :second_test3 :result ?result }. # "59"
+
+# time:dayOfWeek - extract day of week (0-6, Sunday=0)
+{ "2024-06-15T14:30:45-05:00" time:dayOfWeek ?result } => { :dow_test1 :result ?result }. # Saturday = 6
+{ "2024-06-16T00:00:00Z" time:dayOfWeek ?result } => { :dow_test2 :result ?result }. # Sunday = 0
+{ "2024-06-17T00:00:00Z" time:dayOfWeek ?result } => { :dow_test3 :result ?result }. # Monday = 1
+
+# time:timeZone - extract timezone offset string
+{ "2024-06-15T14:30:45-05:00" time:timeZone ?result } => { :tz_test1 :result ?result }. # "-05:00"
+{ "2024-06-15T14:30:45Z" time:timeZone ?result } => { :tz_test2 :result ?result }. # "Z" or "+00:00"
+{ "2024-06-15T14:30:45+02:00" time:timeZone ?result } => { :tz_test3 :result ?result }. # "+02:00"
+
+# ============================================
+# EPOCH CONVERSION
+# ============================================
+
+# time:inSeconds - bidirectional datetime <-> seconds since epoch
+{ "1970-01-01T00:00:00Z" time:inSeconds ?result } => { :epoch_test1 :result ?result }. # 0
+{ "2000-01-01T00:00:00Z" time:inSeconds ?result } => { :epoch_test2 :result ?result }. # 946684800
+
+# Reverse: seconds to datetime
+{ 0 time:inSeconds ?result } => { :epoch_rev_test1 :result ?result }. # "1970-01-01T00:00:00Z"
+{ 946684800 time:inSeconds ?result } => { :epoch_rev_test2 :result ?result }. # "2000-01-01T00:00:00Z"
+
+# ============================================
+# DURATION AND ARITHMETIC (extensions)
+# ============================================
+
+# time:duration - parse ISO 8601 duration
+{ "P1Y" time:durationInSeconds ?result } => { :dur_test1 :result ?result }. # ~31536000
+{ "P1D" time:durationInSeconds ?result } => { :dur_test2 :result ?result }. # 86400
+{ "PT1H" time:durationInSeconds ?result } => { :dur_test3 :result ?result }. # 3600
+{ "PT1M" time:durationInSeconds ?result } => { :dur_test4 :result ?result }. # 60
+{ "PT1S" time:durationInSeconds ?result } => { :dur_test5 :result ?result }. # 1
+
+# time:add - add duration to datetime
+{ ("2024-06-15T00:00:00Z" "P1D") time:add ?result } => { :timeAdd_test1 :result ?result }. # 2024-06-16
+{ ("2024-06-15T00:00:00Z" "PT1H") time:add ?result } => { :timeAdd_test2 :result ?result }. # 01:00:00
+
+# time:subtract - subtract datetimes to get duration
+{ ("2024-06-16T00:00:00Z" "2024-06-15T00:00:00Z") time:difference ?result } => { :timeDiff_test1 :result ?result }.
+
+# ============================================
+# COMPARISON (extensions)
+# ============================================
+
+# time:before - datetime ordering
+{ "2024-01-01T00:00:00Z" time:before "2024-12-31T00:00:00Z" } => { :before_test1 :passed true }.
+{ "2020-01-01T00:00:00Z" time:before "2024-01-01T00:00:00Z" } => { :before_test2 :passed true }.
+
+# time:after - datetime ordering
+{ "2024-12-31T00:00:00Z" time:after "2024-01-01T00:00:00Z" } => { :after_test1 :passed true }.
+{ "2024-01-01T00:00:00Z" time:after "2020-01-01T00:00:00Z" } => { :after_test2 :passed true }.
+
+# time:equalTo - datetime equality
+{ "2024-06-15T12:00:00Z" time:equalTo "2024-06-15T12:00:00Z" } => { :timeEq_test1 :passed true }.
+
+# ============================================
+# FORMATTING (extensions)
+# ============================================
+
+# time:format - format datetime with pattern
+{ ("2024-06-15T14:30:45Z" "%Y/%m/%d") time:format ?result } => { :fmt_test1 :result ?result }. # "2024/06/15"
+{ ("2024-06-15T14:30:45Z" "%B %d, %Y") time:format ?result } => { :fmt_test2 :result ?result }. # "June 15, 2024"

@@ -1,0 +1,132 @@
+# SWAP Compliance Test: math: namespace
+# Tests all math built-in predicates from W3C CWM/SWAP
+
+@prefix math: <http://www.w3.org/2000/10/swap/math#>.
+@prefix : <http://example.org/test#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+
+# ============================================
+# BASIC ARITHMETIC
+# ============================================
+
+# math:sum - addition of list elements
+{ (2 3) math:sum ?result } => { :sum_test1 :result ?result }. # Expected: 5
+{ (1 2 3 4 5) math:sum ?result } => { :sum_test2 :result ?result }. # Expected: 15
+{ (10 -5 3) math:sum ?result } => { :sum_test3 :result ?result }. # Expected: 8
+{ (1.5 2.5) math:sum ?result } => { :sum_test4 :result ?result }. # Expected: 4.0
+
+# math:product - multiplication of list elements
+{ (2 3) math:product ?result } => { :product_test1 :result ?result }. # Expected: 6
+{ (2 3 4) math:product ?result } => { :product_test2 :result ?result }. # Expected: 24
+{ (5 -2) math:product ?result } => { :product_test3 :result ?result }. # Expected: -10
+{ (2.0 3.0) math:product ?result } => { :product_test4 :result ?result }. # Expected: 6.0
+
+# math:difference - subtraction (a - b)
+{ (10 3) math:difference ?result } => { :diff_test1 :result ?result }. # Expected: 7
+{ (5 8) math:difference ?result } => { :diff_test2 :result ?result }. # Expected: -3
+{ (100 50) math:difference ?result } => { :diff_test3 :result ?result }. # Expected: 50
+
+# math:quotient - division (a / b)
+{ (10 2) math:quotient ?result } => { :quot_test1 :result ?result }. # Expected: 5
+{ (7 2) math:quotient ?result } => { :quot_test2 :result ?result }. # Expected: 3.5
+{ (100 4) math:quotient ?result } => { :quot_test3 :result ?result }. # Expected: 25
+
+# math:integerQuotient - integer division floor(a / b)
+{ (10 3) math:integerQuotient ?result } => { :intquot_test1 :result ?result }. # Expected: 3
+{ (17 5) math:integerQuotient ?result } => { :intquot_test2 :result ?result }. # Expected: 3
+{ (-10 3) math:integerQuotient ?result } => { :intquot_test3 :result ?result }. # Expected: -4 (floor)
+
+# math:remainder - modulo (a mod b)
+{ (10 3) math:remainder ?result } => { :rem_test1 :result ?result }. # Expected: 1
+{ (17 5) math:remainder ?result } => { :rem_test2 :result ?result }. # Expected: 2
+{ (100 7) math:remainder ?result } => { :rem_test3 :result ?result }. # Expected: 2
+
+# math:exponentiation - power (base^exponent)
+{ (2 3) math:exponentiation ?result } => { :exp_test1 :result ?result }. # Expected: 8
+{ (10 2) math:exponentiation ?result } => { :exp_test2 :result ?result }. # Expected: 100
+{ (2 10) math:exponentiation ?result } => { :exp_test3 :result ?result }. # Expected: 1024
+{ (4 0.5) math:exponentiation ?result } => { :exp_test4 :result ?result }. # Expected: 2 (sqrt)
+
+# ============================================
+# UNARY OPERATIONS
+# ============================================
+
+# math:negation - negate a number
+{ 5 math:negation ?result } => { :neg_test1 :result ?result }. # Expected: -5
+{ -3 math:negation ?result } => { :neg_test2 :result ?result }. # Expected: 3
+{ 0 math:negation ?result } => { :neg_test3 :result ?result }. # Expected: 0
+
+# math:absoluteValue - absolute value
+{ -5 math:absoluteValue ?result } => { :abs_test1 :result ?result }. # Expected: 5
+{ 5 math:absoluteValue ?result } => { :abs_test2 :result ?result }. # Expected: 5
+{ -3.14 math:absoluteValue ?result } => { :abs_test3 :result ?result }. # Expected: 3.14
+
+# math:rounded - round to nearest integer
+{ 3.7 math:rounded ?result } => { :round_test1 :result ?result }. # Expected: 4
+{ 3.2 math:rounded ?result } => { :round_test2 :result ?result }. # Expected: 3
+{ -2.7 math:rounded ?result } => { :round_test3 :result ?result }. # Expected: -3
+
+# ============================================
+# TRIGONOMETRIC FUNCTIONS
+# ============================================
+
+# math:sin - sine (input in radians)
+{ 0 math:sin ?result } => { :sin_test1 :result ?result }. # Expected: 0
+
+# math:cos - cosine (input in radians)
+{ 0 math:cos ?result } => { :cos_test1 :result ?result }. # Expected: 1
+
+# math:tan - tangent (input in radians)
+{ 0 math:tan ?result } => { :tan_test1 :result ?result }. # Expected: 0
+
+# math:sinh - hyperbolic sine
+{ 0 math:sinh ?result } => { :sinh_test1 :result ?result }. # Expected: 0
+
+# math:tanh - hyperbolic tangent
+{ 0 math:tanh ?result } => { :tanh_test1 :result ?result }. # Expected: 0
+
+# math:atan2 - arc tangent of y/x
+{ (0 1) math:atan2 ?result } => { :atan2_test1 :result ?result }. # Expected: 0
+{ (1 0) math:atan2 ?result } => { :atan2_test2 :result ?result }. # Expected: ~1.5708 (pi/2)
+
+# math:degrees - convert radians to degrees
+{ 3.14159265358979 math:degrees ?result } => { :deg_test1 :result ?result }. # Expected: ~180
+
+# ============================================
+# COMPARISON PREDICATES
+# ============================================
+
+# math:lessThan
+{ 3 math:lessThan 5 } => { :lt_test1 :passed true }.
+{ 5 math:lessThan 3 } => { :lt_test2 :passed true }. # Should NOT fire
+
+# math:greaterThan
+{ 5 math:greaterThan 3 } => { :gt_test1 :passed true }.
+{ 3 math:greaterThan 5 } => { :gt_test2 :passed true }. # Should NOT fire
+
+# math:notLessThan (>=)
+{ 5 math:notLessThan 3 } => { :nlt_test1 :passed true }.
+{ 5 math:notLessThan 5 } => { :nlt_test2 :passed true }.
+{ 3 math:notLessThan 5 } => { :nlt_test3 :passed true }. # Should NOT fire
+
+# math:notGreaterThan (<=)
+{ 3 math:notGreaterThan 5 } => { :ngt_test1 :passed true }.
+{ 5 math:notGreaterThan 5 } => { :ngt_test2 :passed true }.
+{ 5 math:notGreaterThan 3 } => { :ngt_test3 :passed true }. # Should NOT fire
+
+# math:equalTo
+{ 5 math:equalTo 5 } => { :eq_test1 :passed true }.
+{ 5 math:equalTo 6 } => { :eq_test2 :passed true }. # Should NOT fire
+
+# math:notEqualTo
+{ 5 math:notEqualTo 6 } => { :neq_test1 :passed true }.
+{ 5 math:notEqualTo 5 } => { :neq_test2 :passed true }. # Should NOT fire
+
+# ============================================
+# LIST FUNCTIONS
+# ============================================
+
+# math:memberCount - count list elements
+{ (1 2 3 4 5) math:memberCount ?result } => { :count_test1 :result ?result }. # Expected: 5
+{ () math:memberCount ?result } => { :count_test2 :result ?result }. # Expected: 0
+{ ("a" "b" "c") math:memberCount ?result } => { :count_test3 :result ?result }. # Expected: 3

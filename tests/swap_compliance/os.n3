@@ -1,0 +1,96 @@
+# SWAP Compliance Test: os: namespace
+# Tests all os built-in predicates from W3C CWM/SWAP
+
+@prefix os: <http://www.w3.org/2000/10/swap/os#>.
+@prefix : <http://example.org/test#>.
+
+# ============================================
+# ENVIRONMENT VARIABLES
+# ============================================
+
+# os:environ - access environment variables (like Python os.environ)
+{ "HOME" os:environ ?result } => { :env_test1 :result ?result }. # User's home directory
+{ "PATH" os:environ ?result } => { :env_test2 :result ?result }. # System PATH
+{ "USER" os:environ ?result } => { :env_test3 :result ?result }. # Current user
+{ "SHELL" os:environ ?result } => { :env_test4 :result ?result }. # User's shell
+{ "LANG" os:environ ?result } => { :env_test5 :result ?result }. # Language setting
+{ "PWD" os:environ ?result } => { :env_test6 :result ?result }. # Current directory
+
+# Test non-existent variable (should not bind)
+{ "NONEXISTENT_VAR_12345" os:environ ?result } => { :env_test7 :result ?result }. # Should NOT fire
+
+# ============================================
+# COMMAND LINE ARGUMENTS
+# ============================================
+
+# os:argv - access command-line arguments by position
+# Note: argv[0] is typically the program name
+{ 0 os:argv ?result } => { :argv_test1 :result ?result }. # Program name or first arg
+{ 1 os:argv ?result } => { :argv_test2 :result ?result }. # Second argument if present
+
+# ============================================
+# URI RESOLUTION
+# ============================================
+
+# os:baseAbsolute - resolve relative path to absolute URI
+{ "test.n3" os:baseAbsolute ?result } => { :baseAbs_test1 :result ?result }.
+{ "../parent/file.n3" os:baseAbsolute ?result } => { :baseAbs_test2 :result ?result }.
+{ "./relative.n3" os:baseAbsolute ?result } => { :baseAbs_test3 :result ?result }.
+
+# os:baseRelative - make URI relative to base
+{ <file:///home/user/project/test.n3> os:baseRelative ?result } => { :baseRel_test1 :result ?result }.
+
+# ============================================
+# FILE SYSTEM OPERATIONS (extensions)
+# ============================================
+
+# os:fileExists - check if file exists
+# { "/etc/passwd" os:fileExists true } => { :fileExists_test1 :passed true }.
+# { "/nonexistent/path/file.txt" os:fileExists false } => { :fileExists_test2 :passed true }.
+
+# os:isDirectory - check if path is directory
+# { "/tmp" os:isDirectory true } => { :isDir_test1 :passed true }.
+# { "/etc/passwd" os:isDirectory false } => { :isDir_test2 :passed true }.
+
+# os:isFile - check if path is regular file
+# { "/etc/passwd" os:isFile true } => { :isFile_test1 :passed true }.
+# { "/tmp" os:isFile false } => { :isFile_test2 :passed true }.
+
+# os:readFile - read file contents
+# { "/etc/hostname" os:readFile ?content } => { :readFile_test1 :content ?content }.
+
+# os:listDirectory - list directory contents
+# { "/tmp" os:listDirectory ?files } => { :listDir_test1 :files ?files }.
+
+# ============================================
+# PROCESS INFORMATION (extensions)
+# ============================================
+
+# os:pid - get current process ID
+{ "" os:pid ?result } => { :pid_test1 :result ?result }.
+
+# os:hostname - get machine hostname
+{ "" os:hostname ?result } => { :hostname_test1 :result ?result }.
+
+# os:cwd - get current working directory
+{ "" os:cwd ?result } => { :cwd_test1 :result ?result }.
+
+# os:username - get current username
+{ "" os:username ?result } => { :username_test1 :result ?result }.
+
+# ============================================
+# PLATFORM INFORMATION (extensions)
+# ============================================
+
+# os:platform - get platform name (linux, darwin, windows)
+{ "" os:platform ?result } => { :platform_test1 :result ?result }.
+
+# os:arch - get CPU architecture
+{ "" os:arch ?result } => { :arch_test1 :result ?result }.
+
+# ============================================
+# TIME (extensions)
+# ============================================
+
+# os:time - get current Unix timestamp
+{ "" os:time ?result } => { :osTime_test1 :result ?result }.

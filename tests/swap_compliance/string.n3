@@ -1,0 +1,143 @@
+# SWAP Compliance Test: string: namespace
+# Tests all string built-in predicates from W3C CWM/SWAP
+
+@prefix string: <http://www.w3.org/2000/10/swap/string#>.
+@prefix : <http://example.org/test#>.
+
+# ============================================
+# STRING CONCATENATION
+# ============================================
+
+# string:concatenation - join list of strings
+{ ("Hello" " " "World") string:concatenation ?result } => { :concat_test1 :result ?result }. # "Hello World"
+{ ("a" "b" "c") string:concatenation ?result } => { :concat_test2 :result ?result }. # "abc"
+{ ("foo") string:concatenation ?result } => { :concat_test3 :result ?result }. # "foo"
+{ () string:concatenation ?result } => { :concat_test4 :result ?result }. # ""
+{ ("1" "2" "3" "4" "5") string:concatenation ?result } => { :concat_test5 :result ?result }. # "12345"
+
+# ============================================
+# STRING CONTAINMENT
+# ============================================
+
+# string:contains - check if substring exists
+{ "Hello World" string:contains "World" } => { :contains_test1 :passed true }.
+{ "Hello World" string:contains "world" } => { :contains_test2 :passed true }. # Should NOT fire (case sensitive)
+{ "Hello World" string:contains "Hello" } => { :contains_test3 :passed true }.
+{ "foobar" string:contains "oba" } => { :contains_test4 :passed true }.
+
+# string:containsIgnoringCase - case-insensitive containment
+{ "Hello World" string:containsIgnoringCase "world" } => { :containsIC_test1 :passed true }.
+{ "Hello World" string:containsIgnoringCase "HELLO" } => { :containsIC_test2 :passed true }.
+{ "FooBar" string:containsIgnoringCase "ooba" } => { :containsIC_test3 :passed true }.
+
+# string:containsRoughly - ignore case and normalize whitespace
+{ "Hello   World" string:containsRoughly "hello world" } => { :containsR_test1 :passed true }.
+{ "  FOO  BAR  " string:containsRoughly "foo bar" } => { :containsR_test2 :passed true }.
+
+# string:notContainsRoughly - negated rough containment
+{ "Hello World" string:notContainsRoughly "xyz" } => { :notContainsR_test1 :passed true }.
+
+# ============================================
+# STRING COMPARISON
+# ============================================
+
+# string:lessThan - Unicode ordering
+{ "apple" string:lessThan "banana" } => { :strlt_test1 :passed true }.
+{ "AAA" string:lessThan "aaa" } => { :strlt_test2 :passed true }. # uppercase < lowercase in Unicode
+{ "a" string:lessThan "b" } => { :strlt_test3 :passed true }.
+
+# string:greaterThan - Unicode ordering
+{ "banana" string:greaterThan "apple" } => { :strgt_test1 :passed true }.
+{ "z" string:greaterThan "a" } => { :strgt_test2 :passed true }.
+
+# string:notLessThan (>=)
+{ "banana" string:notLessThan "apple" } => { :strnlt_test1 :passed true }.
+{ "apple" string:notLessThan "apple" } => { :strnlt_test2 :passed true }.
+
+# string:notGreaterThan (<=)
+{ "apple" string:notGreaterThan "banana" } => { :strngt_test1 :passed true }.
+{ "apple" string:notGreaterThan "apple" } => { :strngt_test2 :passed true }.
+
+# string:equalIgnoringCase
+{ "Hello" string:equalIgnoringCase "hello" } => { :eqIC_test1 :passed true }.
+{ "WORLD" string:equalIgnoringCase "world" } => { :eqIC_test2 :passed true }.
+{ "FoObAr" string:equalIgnoringCase "fOoBaR" } => { :eqIC_test3 :passed true }.
+
+# string:notEqualIgnoringCase
+{ "Hello" string:notEqualIgnoringCase "World" } => { :neqIC_test1 :passed true }.
+
+# ============================================
+# STRING MATCHING (REGEX)
+# ============================================
+
+# string:matches - Perl/Python regex matching
+{ "hello123" string:matches "^hello[0-9]+$" } => { :match_test1 :passed true }.
+{ "foo@bar.com" string:matches "[a-z]+@[a-z]+[.][a-z]+" } => { :match_test2 :passed true }.
+{ "abc123def" string:matches "[0-9]+" } => { :match_test3 :passed true }. # partial match
+
+# string:notMatches - negated regex
+{ "hello" string:notMatches "^[0-9]+$" } => { :notMatch_test1 :passed true }.
+{ "world" string:notMatches "foo" } => { :notMatch_test2 :passed true }.
+
+# ============================================
+# STRING PREFIX/SUFFIX
+# ============================================
+
+# string:startsWith - test prefix
+{ "Hello World" string:startsWith "Hello" } => { :startsWith_test1 :passed true }.
+{ "foobar" string:startsWith "foo" } => { :startsWith_test2 :passed true }.
+{ "abc" string:startsWith "a" } => { :startsWith_test3 :passed true }.
+{ "abc" string:startsWith "abc" } => { :startsWith_test4 :passed true }.
+
+# string:endsWith - test suffix
+{ "Hello World" string:endsWith "World" } => { :endsWith_test1 :passed true }.
+{ "foobar" string:endsWith "bar" } => { :endsWith_test2 :passed true }.
+{ "abc" string:endsWith "c" } => { :endsWith_test3 :passed true }.
+{ "abc" string:endsWith "abc" } => { :endsWith_test4 :passed true }.
+
+# ============================================
+# STRING MANIPULATION
+# ============================================
+
+# string:replace - substitute all occurrences
+{ ("hello world" "world" "universe") string:replace ?result } => { :replace_test1 :result ?result }. # "hello universe"
+{ ("foo bar foo" "foo" "baz") string:replace ?result } => { :replace_test2 :result ?result }. # "baz bar baz"
+{ ("aaa" "a" "b") string:replace ?result } => { :replace_test3 :result ?result }. # "bbb"
+
+# string:scrape - extract regex group
+{ ("The answer is 42!" "[0-9]+") string:scrape ?result } => { :scrape_test1 :result ?result }. # "42"
+{ ("email: test@example.com" "([a-z]+@[a-z.]+)") string:scrape ?result } => { :scrape_test2 :result ?result }. # "test@example.com"
+
+# string:format - Python-style % formatting
+{ ("%s has %d apples" "Alice" 5) string:format ?result } => { :format_test1 :result ?result }. # "Alice has 5 apples"
+{ ("Value: %.2f" 3.14159) string:format ?result } => { :format_test2 :result ?result }. # "Value: 3.14"
+{ ("%s and %s" "foo" "bar") string:format ?result } => { :format_test3 :result ?result }. # "foo and bar"
+
+# ============================================
+# STRING LENGTH/SPLITTING (extensions)
+# ============================================
+
+# string:length - get string length
+{ "hello" string:length ?result } => { :strlen_test1 :result ?result }. # 5
+{ "" string:length ?result } => { :strlen_test2 :result ?result }. # 0
+{ "Hello World" string:length ?result } => { :strlen_test3 :result ?result }. # 11
+
+# string:upperCase - convert to uppercase
+{ "hello" string:upperCase ?result } => { :upper_test1 :result ?result }. # "HELLO"
+{ "Hello World" string:upperCase ?result } => { :upper_test2 :result ?result }. # "HELLO WORLD"
+
+# string:lowerCase - convert to lowercase
+{ "HELLO" string:lowerCase ?result } => { :lower_test1 :result ?result }. # "hello"
+{ "Hello World" string:lowerCase ?result } => { :lower_test2 :result ?result }. # "hello world"
+
+# string:trim - remove leading/trailing whitespace
+{ "  hello  " string:trim ?result } => { :trim_test1 :result ?result }. # "hello"
+{ "   foo   " string:trim ?result } => { :trim_test2 :result ?result }. # "foo"
+
+# string:split - split string by delimiter
+{ ("a,b,c" ",") string:split ?result } => { :split_test1 :result ?result }. # ("a" "b" "c")
+{ ("hello world" " ") string:split ?result } => { :split_test2 :result ?result }. # ("hello" "world")
+
+# string:substring - extract substring
+{ ("hello" 1 3) string:substring ?result } => { :substr_test1 :result ?result }. # "ell"
+{ ("world" 0 2) string:substring ?result } => { :substr_test2 :result ?result }. # "wo"

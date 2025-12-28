@@ -1,0 +1,104 @@
+# SWAP Compliance Test: list: namespace
+# Tests all list built-in predicates from W3C CWM/SWAP
+
+@prefix list: <http://www.w3.org/2000/10/swap/list#>.
+@prefix math: <http://www.w3.org/2000/10/swap/math#>.
+@prefix : <http://example.org/test#>.
+
+# ============================================
+# LIST CONCATENATION
+# ============================================
+
+# list:append - concatenate lists
+:list1a :value (1 2) .
+:list1b :value (3 4) .
+{ :list1a :value ?a . :list1b :value ?b . (?a ?b) list:append ?result } => { :append_test1 :result ?result }. # (1 2 3 4)
+
+:list2a :value ("hello") .
+:list2b :value ("world") .
+{ :list2a :value ?a . :list2b :value ?b . (?a ?b) list:append ?result } => { :append_test2 :result ?result }. # ("hello" "world")
+
+:emptyList :value () .
+:nonEmpty :value (1 2) .
+{ :emptyList :value ?a . :nonEmpty :value ?b . (?a ?b) list:append ?result } => { :append_test3 :result ?result }. # (1 2)
+{ :nonEmpty :value ?a . :emptyList :value ?b . (?a ?b) list:append ?result } => { :append_test4 :result ?result }. # (1 2)
+
+# ============================================
+# LIST MEMBERSHIP
+# ============================================
+
+# list:member - element is member of list
+{ (1 2 3 4 5) list:member 3 } => { :member_test1 :passed true }.
+{ ("a" "b" "c" "d") list:member "b" } => { :member_test2 :passed true }.
+{ ("hello" "world") list:member "hello" } => { :member_test3 :passed true }.
+{ (1 2 3) list:member 5 } => { :member_test4 :passed true }. # Should NOT fire
+
+# list:in - element in list (reverse of member)
+{ 3 list:in (1 2 3 4 5) } => { :in_test1 :passed true }.
+{ "foo" list:in ("foo" "bar" "baz") } => { :in_test2 :passed true }.
+{ "xyz" list:in ("a" "b" "c") } => { :in_test3 :passed true }. # Should NOT fire
+
+# ============================================
+# LIST ACCESS
+# ============================================
+
+# list:last - get last element
+{ (1 2 3 4 5) list:last ?result } => { :last_test1 :result ?result }. # 5
+{ ("a" "b" "c") list:last ?result } => { :last_test2 :result ?result }. # "c"
+{ ("only") list:last ?result } => { :last_test3 :result ?result }. # "only"
+
+# list:first - get first element
+{ (1 2 3 4 5) list:first ?result } => { :first_test1 :result ?result }. # 1
+{ ("a" "b" "c") list:first ?result } => { :first_test2 :result ?result }. # "a"
+{ ("only") list:first ?result } => { :first_test3 :result ?result }. # "only"
+
+# list:rest - get tail (all but first)
+{ (1 2 3 4 5) list:rest ?result } => { :rest_test1 :result ?result }. # (2 3 4 5)
+{ ("a" "b") list:rest ?result } => { :rest_test2 :result ?result }. # ("b")
+{ ("x") list:rest ?result } => { :rest_test3 :result ?result }. # ()
+
+# list:nth - get element at index (0-based)
+{ (("a" "b" "c" "d") 0) list:nth ?result } => { :nth_test1 :result ?result }. # "a"
+{ (("a" "b" "c" "d") 2) list:nth ?result } => { :nth_test2 :result ?result }. # "c"
+{ (("x" "y" "z") 1) list:nth ?result } => { :nth_test3 :result ?result }. # "y"
+
+# ============================================
+# LIST LENGTH
+# ============================================
+
+# list:length - count elements
+{ (1 2 3 4 5) list:length ?result } => { :len_test1 :result ?result }. # 5
+{ () list:length ?result } => { :len_test2 :result ?result }. # 0
+{ ("a") list:length ?result } => { :len_test3 :result ?result }. # 1
+{ (1 2 3 4 5 6 7 8 9 10) list:length ?result } => { :len_test4 :result ?result }. # 10
+
+# ============================================
+# LIST OPERATIONS (extensions)
+# ============================================
+
+# list:reverse - reverse list
+{ (1 2 3 4 5) list:reverse ?result } => { :rev_test1 :result ?result }. # (5 4 3 2 1)
+{ ("a" "b" "c") list:reverse ?result } => { :rev_test2 :result ?result }. # ("c" "b" "a")
+{ () list:reverse ?result } => { :rev_test3 :result ?result }. # ()
+{ ("x") list:reverse ?result } => { :rev_test4 :result ?result }. # ("x")
+
+# list:sort - sort list
+{ (3 1 4 1 5 9 2 6) list:sort ?result } => { :sort_test1 :result ?result }. # (1 1 2 3 4 5 6 9)
+{ ("c" "a" "b") list:sort ?result } => { :sort_test2 :result ?result }. # ("a" "b" "c")
+
+# list:unique - remove duplicates
+{ (1 2 2 3 3 3 4) list:unique ?result } => { :unique_test1 :result ?result }. # (1 2 3 4)
+{ ("a" "b" "a" "c" "b") list:unique ?result } => { :unique_test2 :result ?result }. # ("a" "b" "c")
+
+# list:remove - remove element from list
+{ ((1 2 3 2 4) 2) list:remove ?result } => { :remove_test1 :result ?result }. # (1 3 4)
+
+# ============================================
+# LIST ITERATION
+# ============================================
+
+# Test iterating with list:member to get all elements
+{ (1 2 3) list:member ?x } => { :iterate_test1 :element ?x }.
+
+# Map pattern: use list:member to generate, then process
+{ (2 4 6) list:member ?x . (?x 2) math:quotient ?half } => { :map_test1 :half ?half }.

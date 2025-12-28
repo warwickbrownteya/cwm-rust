@@ -1,0 +1,167 @@
+# SWAP Compliance Test: N3 Syntax
+# Tests core N3 syntax features
+
+@prefix : <http://example.org/test#>.
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+@prefix owl: <http://www.w3.org/2002/07/owl#>.
+
+# ============================================
+# BASIC TRIPLE SYNTAX
+# ============================================
+
+# Simple triple
+:subject1 :predicate1 :object1 .
+
+# Multiple predicates for same subject
+:subject2 :predA :objA ;
+          :predB :objB ;
+          :predC :objC .
+
+# Multiple objects for same predicate
+:subject3 :predD :obj1, :obj2, :obj3 .
+
+# Combined semicolon and comma
+:subject4 :predE :valE1, :valE2 ;
+          :predF :valF1 .
+
+# ============================================
+# URI SYNTAX
+# ============================================
+
+# Full URI
+<http://example.org/resource> :is <http://example.org/type> .
+
+# Fragment identifiers
+<http://example.org/doc#section1> :part <http://example.org/doc#section2> .
+
+# ============================================
+# BLANK NODES
+# ============================================
+
+# Anonymous blank node with []
+[ :name "Anonymous" ; :value 42 ] :is :something .
+
+# Named blank node
+_:b1 :connects _:b2 .
+_:b2 :connects _:b3 .
+
+# Nested blank nodes
+[ :outer [ :inner "value" ] ] :isNested true .
+
+# Blank node as subject
+_:subjectBlank :hasProperty "property value" .
+
+# Blank node as object
+:resource :hasBlank _:objectBlank .
+
+# ============================================
+# LITERALS
+# ============================================
+
+# Simple string literal
+:lit1 :value "simple string" .
+
+# String with language tag
+:lit2 :label "Hello"@en .
+:lit3 :label "Bonjour"@fr .
+
+# Datatyped literals
+:lit5 :intValue "42"^^xsd:integer .
+:lit6 :floatValue "3.14159"^^xsd:decimal .
+:lit7 :boolValue "true"^^xsd:boolean .
+:lit8 :dateValue "2024-06-15"^^xsd:date .
+
+# Long string (multi-line)
+:lit9 :description """This is a
+multi-line
+string literal.""" .
+
+# Numeric literals (shorthand)
+:num1 :intVal 42 .
+:num2 :negInt -17 .
+:num3 :decimal 3.14 .
+:num4 :negDecimal -2.718 .
+:num5 :exponent 6.022e23 .
+:num6 :negExponent 1.6e-19 .
+
+# Boolean literals (shorthand)
+:bool1 :isTrue true .
+:bool2 :isFalse false .
+
+# ============================================
+# COLLECTIONS (RDF LISTS)
+# ============================================
+
+# Simple list
+:coll1 :hasList (1 2 3 4 5) .
+
+# List of strings
+:coll2 :sequence ("a" "b" "c" "d") .
+
+# Mixed list
+:coll3 :mixed ("string" 42 true) .
+
+# Empty list
+:coll5 :empty () .
+
+# ============================================
+# FORMULAS (N3 EXTENSION)
+# ============================================
+
+# Simple formula
+:form1 :describes { :a :b :c } .
+
+# Formula with multiple statements
+:form2 :contains {
+    :x :y :z .
+    :p :q :r .
+} .
+
+# ============================================
+# RULES (IMPLIES)
+# ============================================
+
+# Simple rule
+{ :x :type :Person } => { :x :is :Human } .
+
+# Rule with variable
+{ ?person :name ?name } => { ?person :hasName ?name } .
+
+# Rule with multiple conditions
+{ ?x :type :A . ?x :related ?y . ?y :type :B }
+    => { ?x :connectedTo ?y } .
+
+# Chained rules
+{ ?a :parent ?b } => { ?b :child ?a } .
+
+# ============================================
+# SPECIAL PREDICATES
+# ============================================
+
+# rdf:type shorthand (a)
+:instance a :Class .
+:resource a owl:Thing .
+
+# owl:sameAs
+:alias owl:sameAs :original .
+
+# rdfs:subClassOf
+:SubClass rdfs:subClassOf :SuperClass .
+
+# ============================================
+# EDGE CASES
+# ============================================
+
+# Self-referential
+:self :references :self .
+
+# Very long local name
+:thisIsAVeryLongLocalNameThatExceedsTypicalLengthLimits :exists true .
+
+# Multiple types
+:multi a :Type1, :Type2, :Type3 .
+
+# Complex nested structure
+[ :level1 [ :level2 [ :level3 "deep" ] ] ] :depth 3 .

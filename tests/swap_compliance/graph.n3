@@ -1,0 +1,94 @@
+# SWAP Compliance Test: graph: namespace
+# Tests graph built-in predicates from W3C CWM/SWAP
+
+@prefix graph: <http://www.w3.org/2000/10/swap/graph#>.
+@prefix : <http://example.org/test#>.
+@prefix log: <http://www.w3.org/2000/10/swap/log#>.
+
+# ============================================
+# GRAPH OPERATIONS
+# ============================================
+
+# graph:member - get members of a graph/formula
+{ { :a :b :c . :d :e :f } graph:member ?triple } => { :graphMember_test1 :triple ?triple }.
+
+# graph:length - count statements in a graph
+{ { :a :b :c . :d :e :f . :g :h :i } graph:length ?count } => { :graphLen_test1 :count ?count }. # 3
+
+# graph:difference - compute graph difference
+# { ( { :a :b :c . :d :e :f } { :a :b :c } ) graph:difference ?result }
+#     => { :graphDiff_test1 :result ?result }. # { :d :e :f }
+
+# ============================================
+# GRAPH COMPARISON
+# ============================================
+
+# graph:equalTo - graph isomorphism
+{ { :a :b :c } graph:equalTo { :a :b :c } } => { :graphEq_test1 :passed true }.
+
+# graph:notEqualTo - graphs are not isomorphic
+{ { :a :b :c } graph:notEqualTo { :x :y :z } } => { :graphNeq_test1 :passed true }.
+
+# ============================================
+# STATEMENT ACCESS
+# ============================================
+
+# Access subject of a statement
+{ { :s :p :o } graph:member ?stmt . ?stmt graph:subject ?subj }
+    => { :stmt_subj_test1 :subject ?subj }. # :s
+
+# Access predicate of a statement
+{ { :s :p :o } graph:member ?stmt . ?stmt graph:predicate ?pred }
+    => { :stmt_pred_test1 :predicate ?pred }. # :p
+
+# Access object of a statement
+{ { :s :p :o } graph:member ?stmt . ?stmt graph:object ?obj }
+    => { :stmt_obj_test1 :object ?obj }. # :o
+
+# ============================================
+# GRAPH CONSTRUCTION
+# ============================================
+
+# Create statement from components
+# { (:s :p :o) graph:statement ?stmt } => { :mkstmt_test1 :statement ?stmt }.
+
+# Merge graphs
+# { ({ :a :b :c } { :d :e :f }) graph:union ?merged }
+#     => { :union_test1 :result ?merged }. # { :a :b :c . :d :e :f }
+
+# Intersect graphs
+# { ({ :a :b :c . :d :e :f } { :a :b :c . :g :h :i }) graph:intersection ?common }
+#     => { :intersect_test1 :result ?common }. # { :a :b :c }
+
+# ============================================
+# GRAPH FILTERING
+# ============================================
+
+# Filter by predicate
+# { { :a :type :X . :b :type :Y . :c :name "test" } graph:filter (:type) ?filtered }
+#     => { :filter_test1 :result ?filtered }. # statements with :type predicate
+
+# ============================================
+# REIFICATION ACCESS
+# ============================================
+
+# For reified statements
+:stmt1 a rdf:Statement ;
+    rdf:subject :subj1 ;
+    rdf:predicate :pred1 ;
+    rdf:object :obj1 .
+
+{ :stmt1 rdf:subject ?s . :stmt1 rdf:predicate ?p . :stmt1 rdf:object ?o }
+    => { :reif_test1 :reconstructed (?s ?p ?o) }.
+
+# ============================================
+# NAMED GRAPHS (extensions)
+# ============================================
+
+# Note: Named graph support varies by implementation
+# :graphName {
+#     :a :b :c .
+#     :d :e :f .
+# } .
+
+# { :graphName graph:contains { :a :b :c } } => { :namedGraph_test1 :passed true }.
