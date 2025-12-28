@@ -27,7 +27,9 @@
 //! ```
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use axum::{
     extract::{Query, State},
@@ -60,6 +62,16 @@ pub struct ServerConfig {
     pub enable_tracing: bool,
     /// Maximum request body size in bytes
     pub max_body_size: usize,
+    /// Enable rate limiting
+    pub enable_rate_limit: bool,
+    /// Maximum requests per second (0 = unlimited)
+    pub rate_limit_rps: u32,
+    /// Rate limit burst size
+    pub rate_limit_burst: u32,
+    /// Maximum query length in characters
+    pub max_query_length: usize,
+    /// Maximum results to return
+    pub max_results: usize,
 }
 
 impl ServerConfig {
@@ -71,6 +83,11 @@ impl ServerConfig {
             cors_permissive: true,
             enable_tracing: true,
             max_body_size: 10 * 1024 * 1024, // 10 MB
+            enable_rate_limit: true,
+            rate_limit_rps: 100,
+            rate_limit_burst: 200,
+            max_query_length: 1_000_000, // 1MB query limit
+            max_results: 100_000, // 100k results max
         }
     }
 
@@ -83,6 +100,14 @@ impl ServerConfig {
     /// Set CORS permissiveness
     pub fn with_cors(mut self, permissive: bool) -> Self {
         self.cors_permissive = permissive;
+        self
+    }
+
+    /// Configure rate limiting
+    pub fn with_rate_limit(mut self, enabled: bool, rps: u32, burst: u32) -> Self {
+        self.enable_rate_limit = enabled;
+        self.rate_limit_rps = rps;
+        self.rate_limit_burst = burst;
         self
     }
 
@@ -101,6 +126,98 @@ impl Default for ServerConfig {
 }
 
 // ============================================================================
+// Rate Limiter
+// ============================================================================
+
+/// Token bucket rate limiter for request throttling
+pub struct RateLimiter {
+    /// Maximum tokens (burst capacity)
+    capacity: u64,
+    /// Current token count
+    tokens: AtomicU64,
+    /// Tokens added per second
+    refill_rate: u64,
+    /// Last refill time (as unix timestamp in millis)
+    last_refill: RwLock<Instant>,
+}
+
+impl RateLimiter {
+    /// Create a new rate limiter
+    ///
+    /// # Arguments
+    /// * `rps` - Requests per second allowed
+    /// * `burst` - Maximum burst size (tokens)
+    pub fn new(rps: u32, burst: u32) -> Self {
+        Self {
+            capacity: burst as u64,
+            tokens: AtomicU64::new(burst as u64),
+            refill_rate: rps as u64,
+            last_refill: RwLock::new(Instant::now()),
+        }
+    }
+
+    /// Try to acquire a token for a request
+    ///
+    /// Returns true if the request should be allowed, false if rate limited.
+    pub async fn try_acquire(&self) -> bool {
+        // Refill tokens based on elapsed time
+        self.refill().await;
+
+        // Try to consume a token
+        loop {
+            let current = self.tokens.load(Ordering::Relaxed);
+            if current == 0 {
+                return false; // Rate limited
+            }
+
+            if self.tokens.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ).is_ok() {
+                return true; // Token acquired
+            }
+        }
+    }
+
+    /// Refill tokens based on elapsed time
+    async fn refill(&self) {
+        let mut last = self.last_refill.write().await;
+        let now = Instant::now();
+        let elapsed = now.duration_since(*last);
+
+        // Calculate tokens to add (fractional seconds)
+        let tokens_to_add = (elapsed.as_millis() as u64 * self.refill_rate) / 1000;
+
+        if tokens_to_add > 0 {
+            // Update last refill time
+            *last = now;
+
+            // Add tokens up to capacity
+            loop {
+                let current = self.tokens.load(Ordering::Relaxed);
+                let new_count = (current + tokens_to_add).min(self.capacity);
+
+                if self.tokens.compare_exchange_weak(
+                    current,
+                    new_count,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ).is_ok() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Get current token count (for stats)
+    pub fn available_tokens(&self) -> u64 {
+        self.tokens.load(Ordering::Relaxed)
+    }
+}
+
+// ============================================================================
 // Application State
 // ============================================================================
 
@@ -110,15 +227,34 @@ pub struct AppState {
     pub store: RwLock<Store>,
     /// Server configuration
     pub config: ServerConfig,
+    /// Rate limiter (optional)
+    pub rate_limiter: Option<RateLimiter>,
 }
 
 impl AppState {
     /// Create new application state
     pub fn new(store: Store, config: ServerConfig) -> Self {
+        let rate_limiter = if config.enable_rate_limit && config.rate_limit_rps > 0 {
+            Some(RateLimiter::new(config.rate_limit_rps, config.rate_limit_burst))
+        } else {
+            None
+        };
+
         Self {
             store: RwLock::new(store),
             config,
+            rate_limiter,
         }
+    }
+
+    /// Check rate limit and return error if exceeded
+    pub async fn check_rate_limit(&self) -> Option<ErrorResponse> {
+        if let Some(ref limiter) = self.rate_limiter {
+            if !limiter.try_acquire().await {
+                return Some(ErrorResponse::rate_limited());
+            }
+        }
+        None
     }
 }
 
@@ -162,31 +298,71 @@ impl IntoResponse for SparqlResponse {
     }
 }
 
-/// Error response
+/// Structured error response using CwmError
 pub struct ErrorResponse {
-    status: StatusCode,
-    message: String,
+    error: crate::error::CwmError,
 }
 
 impl ErrorResponse {
+    /// Create from a CwmError
+    pub fn from_error(error: crate::error::CwmError) -> Self {
+        Self { error }
+    }
+
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
+            error: crate::error::CwmError::validation(message),
         }
     }
 
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: message.into(),
+            error: crate::error::CwmError::internal(message),
+        }
+    }
+
+    pub fn rate_limited() -> Self {
+        Self {
+            error: crate::error::CwmError::rate_limited(),
+        }
+    }
+
+    pub fn sparql_error(message: impl Into<String>) -> Self {
+        Self {
+            error: crate::error::CwmError::sparql_syntax(message),
+        }
+    }
+
+    pub fn query_too_large(size: usize, limit: usize) -> Self {
+        Self {
+            error: crate::error::CwmError::input_too_large(size, limit)
+                .with_context("type", "SPARQL query"),
         }
     }
 }
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
-        (self.status, self.message).into_response()
+        let status = StatusCode::from_u16(self.error.http_status())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Create structured JSON response
+        let response = crate::error::ErrorResponse::from(&self.error);
+        let body = serde_json::to_string_pretty(&response)
+            .unwrap_or_else(|_| format!(r#"{{"error":true,"message":"{}"}}"#, self.error.message));
+
+        (
+            status,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response()
+    }
+}
+
+impl From<crate::error::CwmError> for ErrorResponse {
+    fn from(error: crate::error::CwmError) -> Self {
+        Self::from_error(error)
     }
 }
 
@@ -200,6 +376,11 @@ async fn sparql_get(
     Query(params): Query<SparqlQueryParams>,
     headers: axum::http::HeaderMap,
 ) -> Result<SparqlResponse, ErrorResponse> {
+    // Check rate limit
+    if let Some(err) = state.check_rate_limit().await {
+        return Err(err);
+    }
+
     let query = params
         .query
         .ok_or_else(|| ErrorResponse::bad_request("Missing 'query' parameter"))?;
@@ -213,6 +394,11 @@ async fn sparql_post(
     headers: axum::http::HeaderMap,
     body: String,
 ) -> Result<SparqlResponse, ErrorResponse> {
+    // Check rate limit
+    if let Some(err) = state.check_rate_limit().await {
+        return Err(err);
+    }
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -245,6 +431,19 @@ async fn execute_sparql_query(
     format_param: Option<String>,
     headers: &axum::http::HeaderMap,
 ) -> Result<SparqlResponse, ErrorResponse> {
+    // Validate query length
+    if query.len() > state.config.max_query_length {
+        return Err(ErrorResponse::query_too_large(
+            query.len(),
+            state.config.max_query_length,
+        ));
+    }
+
+    // Basic query sanitization - reject queries with suspicious patterns
+    if let Some(err) = validate_sparql_query(query) {
+        return Err(err);
+    }
+
     // Determine output format from Accept header or format parameter
     let accept = headers
         .get(header::ACCEPT)
@@ -259,7 +458,7 @@ async fn execute_sparql_query(
     // Execute query (read lock on store)
     let store = state.store.read().await;
     let result = execute_sparql(&store, query)
-        .map_err(|e| ErrorResponse::bad_request(format!("SPARQL error: {}", e)))?;
+        .map_err(|e| ErrorResponse::sparql_error(e))?;
 
     // Format result
     let (content_type, body) = if use_json {
@@ -269,6 +468,41 @@ async fn execute_sparql_query(
     };
 
     Ok(SparqlResponse { body, content_type })
+}
+
+/// Validate SPARQL query for safety
+fn validate_sparql_query(query: &str) -> Option<ErrorResponse> {
+    use crate::error::{CwmError, ErrorCode};
+
+    let query_upper = query.to_uppercase();
+
+    // Check for potentially dangerous operations
+    let dangerous_patterns = [
+        ("DROP", "DROP operations are not supported on this endpoint"),
+        ("CLEAR", "CLEAR operations are not supported on this endpoint"),
+        ("LOAD", "LOAD operations are not supported on this endpoint"),
+        ("CREATE", "CREATE operations are not supported on this endpoint"),
+    ];
+
+    for (pattern, message) in dangerous_patterns {
+        // Look for the pattern as a keyword (not part of a URI or string)
+        if query_upper.split_whitespace().any(|word| word == pattern) {
+            let err = CwmError::new(ErrorCode::Forbidden, message)
+                .with_context("operation", pattern)
+                .with_hint("This is a read-only SPARQL endpoint. Use SELECT, ASK, or CONSTRUCT queries.");
+            return Some(ErrorResponse::from_error(err));
+        }
+    }
+
+    // Check for null bytes or other control characters
+    if query.bytes().any(|b| b == 0 || (b < 32 && b != b'\n' && b != b'\r' && b != b'\t')) {
+        let err = CwmError::validation("Query contains invalid control characters")
+            .with_code(ErrorCode::InvalidValue)
+            .with_hint("Remove null bytes and control characters from the query.");
+        return Some(ErrorResponse::from_error(err));
+    }
+
+    None
 }
 
 /// Serve the HTML query form at /
@@ -332,10 +566,21 @@ async fn stats(State(state): State<SharedState>) -> impl IntoResponse {
     let store = state.store.read().await;
     let count = store.len();
 
+    // Get rate limiter stats if enabled
+    let rate_limit_info = state.rate_limiter.as_ref().map(|limiter| {
+        serde_json::json!({
+            "enabled": true,
+            "rps": state.config.rate_limit_rps,
+            "burst": state.config.rate_limit_burst,
+            "available_tokens": limiter.available_tokens(),
+        })
+    }).unwrap_or_else(|| serde_json::json!({ "enabled": false }));
+
     let json = serde_json::json!({
         "status": "ok",
         "triple_count": count,
         "version": env!("CARGO_PKG_VERSION"),
+        "rate_limit": rate_limit_info,
     });
 
     (

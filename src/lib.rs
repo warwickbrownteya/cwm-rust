@@ -54,6 +54,8 @@
 
 // Core abstractions (Phase 1 of refactoring)
 pub mod core;
+pub mod config;
+pub mod error;
 pub mod term;
 pub mod parser;
 pub mod store;
@@ -64,6 +66,7 @@ pub mod sparql;
 pub mod fuseki;
 pub mod prover;
 pub mod server;
+pub mod http_client;
 
 // Re-export core traits and types
 pub use crate::core::{
@@ -97,3 +100,21 @@ pub use reasoning::{ReasoningStrategy, StrategyConfig, InferenceStats, ForwardCh
 
 // Re-export async server types
 pub use server::{ServerConfig, AppState, run_server, create_router};
+
+// Re-export configuration types
+pub use config::{
+    CwmConfig, ConfigError,
+    GeneralConfig, ReasoningConfig, StoreConfig, SecurityConfig, ProfileConfig,
+    OutputFormat, LogLevel, ReasoningProfile, StoreBackend,
+};
+
+// Re-export HTTP client types
+pub use http_client::{
+    get_sync_client, get_async_client, create_sync_client, create_async_client,
+    HttpClientConfig, HttpError, is_domain_allowed,
+};
+
+// Re-export error types
+pub use error::{
+    CwmError, CwmResult, ErrorCode, ErrorContext, ErrorResponse,
+};

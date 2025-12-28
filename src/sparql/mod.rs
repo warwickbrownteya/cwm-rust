@@ -2272,12 +2272,10 @@ impl<'a> SparqlEngine<'a> {
         let encoded_query: String = utf8_percent_encode(query, NON_ALPHANUMERIC).to_string();
         let url = format!("{}?query={}", endpoint, encoded_query);
 
-        // Execute HTTP request
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(30))
-            .build();
+        // Execute HTTP request using shared client with connection pooling
+        let client = crate::http_client::get_sync_client();
 
-        let response = agent.get(&url)
+        let response = client.get(&url)
             .set("Accept", "application/sparql-results+json")
             .call()
             .map_err(|e| format!("HTTP error: {}", e))?;

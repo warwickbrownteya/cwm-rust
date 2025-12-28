@@ -16,6 +16,7 @@ use cwm::term::Variable;
 use cwm::fuseki::FusekiStoreBuilder;
 use cwm::core::TripleStore;
 use cwm::server::{ServerConfig, run_server};
+use cwm::config::CwmConfig;
 
 /// N3 output formatting options
 #[derive(Default, Clone)]
@@ -388,6 +389,26 @@ struct Cli {
     ///   dl-tableau    - Description Logic (OWL)
     #[arg(long = "engine", value_name = "ENGINE")]
     engine: Option<String>,
+
+    /// Reasoning profile to use.
+    ///
+    /// Available profiles:
+    ///   default     - Balanced settings for general use
+    ///   rdfs        - RDFS entailment with subclass/subproperty reasoning
+    ///   owl         - OWL 2 RL reasoning with class/property axioms
+    ///   shacl       - SHACL validation mode
+    ///   performance - Optimized for speed (reduced inference depth)
+    ///   complete    - Maximum completeness (slower but thorough)
+    #[arg(long = "profile", value_name = "PROFILE")]
+    profile: Option<String>,
+
+    /// Configuration file path (overrides default discovery)
+    #[arg(long = "config", value_name = "FILE")]
+    config_file: Option<PathBuf>,
+
+    /// Generate default configuration file and exit
+    #[arg(long = "init-config")]
+    init_config: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -415,10 +436,10 @@ fn parse_language(lang: &str) -> Option<OutputFormat> {
     }
 }
 
-/// Fetch content from a URL using HTTP
+/// Fetch content from a URL using HTTP (with connection pooling)
 fn fetch_url(url: &str) -> Result<String> {
-    let response = ureq::get(url)
-        .timeout(std::time::Duration::from_secs(30))
+    let client = cwm::get_sync_client();
+    let response = client.get(url)
         .call()
         .with_context(|| format!("Failed to fetch URL: {}", url))?;
 
@@ -1136,6 +1157,36 @@ fn run_prover_engine(
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Handle --init-config: generate default config file and exit
+    if cli.init_config {
+        let config = CwmConfig::default();
+        let toml_str = toml::to_string_pretty(&config)
+            .context("Failed to serialize default config")?;
+
+        let config_path = dirs::home_dir()
+            .map(|h| h.join(".cwm").join("config.toml"))
+            .unwrap_or_else(|| PathBuf::from("cwm.toml"));
+
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)
+                .context("Failed to create config directory")?;
+        }
+
+        fs::write(&config_path, &toml_str)
+            .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+
+        println!("Generated default config: {}", config_path.display());
+        println!("\nConfiguration options:");
+        println!("  [general]       - Output format, verbosity, base URI");
+        println!("  [reasoning]     - Max steps, tabling, stratification");
+        println!("  [server]        - SPARQL endpoint settings");
+        println!("  [store]         - Backend type (memory, fuseki, sqlite)");
+        println!("  [security]      - Crypto enable, allowed hosts");
+        println!("  [prefixes]      - Default namespace prefixes");
+        println!("  [profiles.*]    - Custom reasoning profiles");
+        return Ok(());
+    }
+
     // Handle --revision flag: output version info
     if cli.revision {
         println!("cwm-rust version 0.1.0");
@@ -1144,6 +1195,39 @@ fn main() -> Result<()> {
         println!("Repository: https://github.com/cwm-rust/cwm");
         return Ok(());
     }
+
+    // Load configuration (from file or defaults)
+    let mut config = if let Some(ref config_path) = cli.config_file {
+        CwmConfig::load_from_file(config_path)
+            .with_context(|| format!("Failed to load config from {}", config_path.display()))?
+    } else {
+        CwmConfig::load().unwrap_or_else(|e| {
+            if cli.verbose {
+                eprintln!("Note: Using default config ({})", e);
+            }
+            CwmConfig::default()
+        })
+    };
+
+    // Apply environment variable overrides
+    config.apply_env_overrides();
+
+    // Apply reasoning profile (CLI --profile overrides config file setting)
+    if let Some(ref profile_name) = cli.profile {
+        config.apply_profile(profile_name)
+            .with_context(|| format!("Failed to apply profile: {}", profile_name))?;
+
+        if cli.verbose && !cli.quiet {
+            eprintln!("Using reasoning profile: {}", profile_name);
+        }
+    }
+
+    // Use config values as defaults (CLI flags override config)
+    let effective_max_steps = if cli.max_steps != 10000 {
+        cli.max_steps // CLI explicitly set
+    } else {
+        config.reasoning.max_steps
+    };
 
     // Determine effective output format (--language overrides default if no explicit --format)
     let effective_format = if let Some(ref lang) = cli.language {
@@ -1457,24 +1541,24 @@ fn main() -> Result<()> {
     }
 
     if should_think && cli.engine.is_none() {
-        let max_steps = if cli.max_steps == 0 { usize::MAX } else { cli.max_steps };
-        let config = ReasonerConfig {
+        let max_steps = if effective_max_steps == 0 { usize::MAX } else { effective_max_steps };
+        let reasoner_config = ReasonerConfig {
             max_steps,
             recursive: true,
             filter: effective_filter,
             generate_proof: cli.why,
-            enable_tabling: true,
-            enable_crypto: cli.crypto,
+            enable_tabling: config.reasoning.enable_tabling,
+            enable_crypto: cli.crypto || config.security.enable_crypto,
         };
 
-        let mut reasoner = Reasoner::with_config(config);
+        let mut reasoner = Reasoner::with_config(reasoner_config);
 
         // Add all rules
         for rule in &all_rules {
             reasoner.add_rule(rule.clone());
         }
 
-        // Run the reasoner (proof tracking is handled internally based on config)
+        // Run the reasoner (proof tracking is handled internally based on reasoner_config)
         let stats = reasoner.run(&mut store);
 
         if !cli.quiet && cli.verbose {
@@ -1505,20 +1589,20 @@ fn main() -> Result<()> {
 
     // Handle --filter-rules: apply rules and replace store with conclusions only
     if !filter_rules.is_empty() {
-        let max_steps = if cli.max_steps == 0 { usize::MAX } else { cli.max_steps };
-        let config = ReasonerConfig {
+        let max_steps = if effective_max_steps == 0 { usize::MAX } else { effective_max_steps };
+        let filter_config = ReasonerConfig {
             max_steps,
             recursive: true,
             filter: true, // Always filter for --filter-rules
             generate_proof: false,
-            enable_tabling: true,
-            enable_crypto: cli.crypto,
+            enable_tabling: config.reasoning.enable_tabling,
+            enable_crypto: cli.crypto || config.security.enable_crypto,
         };
 
         // Track triples before filter-rules
         let before_filter: std::collections::HashSet<Triple> = store.iter().cloned().collect();
 
-        let mut reasoner = Reasoner::with_config(config);
+        let mut reasoner = Reasoner::with_config(filter_config);
         for rule in &filter_rules {
             reasoner.add_rule(rule.clone());
         }
@@ -3130,13 +3214,11 @@ fn fetch_document(uri: &str) -> Result<String> {
         let path = &uri[7..];
         fs::read_to_string(path).context("Failed to read local file")
     } else if uri.starts_with("http://") || uri.starts_with("https://") {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(30))
-            .build();
+        // Use shared HTTP client with connection pooling
+        let client = cwm::get_sync_client();
 
-        let response = agent.get(uri)
+        let response = client.get(uri)
             .set("Accept", RDF_ACCEPT)
-            .set("User-Agent", "cwm-rust/0.1")
             .call()
             .map_err(|e| anyhow::anyhow!("HTTP error: {}", e))?;
         response.into_string().context("Failed to read HTTP response")

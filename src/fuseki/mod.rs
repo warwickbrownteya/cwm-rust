@@ -23,7 +23,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use crate::term::{Term, Triple, Bindings, Variable};
 use crate::core::TripleStore;
@@ -129,9 +128,12 @@ impl FusekiStore {
 
     /// Create a new FusekiStore with custom configuration
     pub fn with_config(config: FusekiConfig) -> Result<Self, String> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .build();
+        // Use shared HTTP client configuration with custom timeout
+        let http_config = crate::http_client::HttpClientConfig {
+            request_timeout_secs: config.timeout_secs,
+            ..Default::default()
+        };
+        let agent = crate::http_client::create_sync_client(&http_config);
 
         // Test connectivity
         let store = Self {

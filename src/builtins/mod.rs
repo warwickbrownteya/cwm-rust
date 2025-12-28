@@ -37,14 +37,8 @@ use std::sync::Arc;
 use crate::term::{Term, Triple, Variable, Bindings, uri::ns, FormulaRef, List};
 use crate::parser;
 
-// Re-export ureq for web fetching
-use ureq;
-
 /// Content types for RDF content negotiation
 const RDF_ACCEPT_HEADER: &str = "text/n3, text/turtle, application/n-triples;q=0.9, application/rdf+xml;q=0.8, application/ld+json;q=0.7, */*;q=0.1";
-
-/// Timeout for HTTP requests in seconds
-const HTTP_TIMEOUT_SECS: u64 = 30;
 
 /// Fetch a document from a URI with proper RDF content negotiation
 /// Returns (content, content_type) or error message
@@ -72,13 +66,11 @@ fn fetch_rdf_document(uri: &str) -> Result<(String, String), String> {
             })
             .map_err(|e| format!("File error: {}", e))
     } else if uri.starts_with("http://") || uri.starts_with("https://") {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
-            .build();
+        // Use shared HTTP client with connection pooling
+        let client = crate::http_client::get_sync_client();
 
-        agent.get(uri)
+        client.get(uri)
             .set("Accept", RDF_ACCEPT_HEADER)
-            .set("User-Agent", "cwm-rust/0.1")
             .call()
             .map_err(|e| format!("HTTP error: {}", e))
             .and_then(|response| {
@@ -2192,9 +2184,10 @@ impl BuiltinRegistry {
                         return match_or_bind_string(object, content, bindings);
                     }
                 }
-                // Handle http:// and https:// URIs
+                // Handle http:// and https:// URIs (with connection pooling)
                 else if uri_str.starts_with("http://") || uri_str.starts_with("https://") {
-                    if let Ok(response) = ureq::get(uri_str).call() {
+                    let client = crate::http_client::get_sync_client();
+                    if let Ok(response) = client.get(uri_str).call() {
                         if let Ok(content) = response.into_string() {
                             return match_or_bind_string(object, content, bindings);
                         }
