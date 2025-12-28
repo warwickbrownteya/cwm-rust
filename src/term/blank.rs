@@ -2,9 +2,31 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 
 /// Counter for generating unique blank node IDs
 static BLANK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Run-specific prefix for unique blank node IDs (mode 'u')
+static RUN_PREFIX: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set a run-specific prefix for blank node IDs
+/// This is used when mode 'u' is enabled to ensure unique IDs across runs
+pub fn set_run_prefix(prefix: String) {
+    let mut guard = RUN_PREFIX.write().unwrap();
+    *guard = Some(prefix);
+}
+
+/// Clear the run-specific prefix
+pub fn clear_run_prefix() {
+    let mut guard = RUN_PREFIX.write().unwrap();
+    *guard = None;
+}
+
+/// Get the current run prefix if set
+fn get_run_prefix() -> Option<String> {
+    RUN_PREFIX.read().ok().and_then(|guard| guard.clone())
+}
 
 /// A blank node (anonymous node)
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -40,6 +62,16 @@ impl BlankNode {
     /// Get the label if present
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
+    }
+
+    /// Get a unique identifier for this blank node
+    /// If a run prefix is set (mode 'u'), includes the prefix
+    pub fn unique_id(&self) -> String {
+        if let Some(prefix) = get_run_prefix() {
+            format!("{}_b{}", prefix, self.id)
+        } else {
+            format!("b{}", self.id)
+        }
     }
 }
 

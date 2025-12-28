@@ -114,6 +114,7 @@ pub mod ns {
     pub const TIME: &str = "http://www.w3.org/2000/10/swap/time#";
     pub const OS: &str = "http://www.w3.org/2000/10/swap/os#";
     pub const GRAPH: &str = "http://www.w3.org/2000/10/swap/graph#";
+    pub const DB: &str = "http://www.w3.org/2000/10/swap/db#";
 
     // Common RDF terms
     pub fn rdf_type() -> Uri { Uri::new(format!("{}type", RDF)) }

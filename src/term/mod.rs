@@ -21,7 +21,7 @@ mod list;
 
 pub use uri::Uri;
 pub use literal::{Literal, Datatype};
-pub use blank::BlankNode;
+pub use blank::{BlankNode, set_run_prefix, clear_run_prefix};
 pub use variable::{Variable, Quantification};
 pub use list::List;
 

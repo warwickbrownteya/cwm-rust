@@ -51,6 +51,9 @@ serde_json = "1"
 # HTTP server for SPARQL endpoint
 tiny_http = "0.12"
 
+# SQLite for database access (db: namespace)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [dev-dependencies]
 pretty_assertions = "1"
 

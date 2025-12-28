@@ -222,6 +222,8 @@ impl BuiltinRegistry {
         registry.register_os();
         // Register graph built-ins
         registry.register_graph();
+        // Register database built-ins
+        registry.register_db();
 
         registry
     }
@@ -5448,6 +5450,374 @@ impl BuiltinRegistry {
                         let mut new_bindings = bindings.clone();
                         new_bindings.insert(var.clone(), triple_list);
                         return BuiltinResult::Success(new_bindings);
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+    }
+
+    /// Register database builtins (db: namespace)
+    /// Provides SQLite database access
+    pub fn register_db(&mut self) {
+        use rusqlite::Connection;
+        use std::sync::{Arc, Mutex};
+        use std::collections::HashMap;
+
+        // Thread-local storage for database connections
+        thread_local! {
+            static DB_CONNECTIONS: std::cell::RefCell<HashMap<String, Arc<Mutex<Connection>>>> =
+                std::cell::RefCell::new(HashMap::new());
+        }
+
+        // db:connect - path db:connect handle
+        // Opens a SQLite database connection
+        self.register(&format!("{}connect", ns::DB), |subject, object, bindings| {
+            if let Some(path) = get_string(&subject) {
+                // Try to open the database
+                match Connection::open(&path) {
+                    Ok(conn) => {
+                        // Create a unique handle identifier
+                        let handle = format!("db:handle:{}", path);
+                        let handle_term = Term::Literal(std::sync::Arc::new(
+                            crate::term::Literal::plain(handle.clone())
+                        ));
+
+                        // Store connection in thread-local storage
+                        DB_CONNECTIONS.with(|conns| {
+                            conns.borrow_mut().insert(handle, Arc::new(Mutex::new(conn)));
+                        });
+
+                        // Bind result
+                        if let Term::Variable(var) = object {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(var.clone(), handle_term);
+                            return BuiltinResult::Success(new_bindings);
+                        }
+                        return BuiltinResult::Success(bindings.clone());
+                    }
+                    Err(_) => return BuiltinResult::Failure,
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // db:query - (handle "SQL") db:query results
+        // Executes a SQL query and returns results as a list of lists
+        self.register(&format!("{}query", ns::DB), |subject, object, bindings| {
+            if let Term::List(args) = subject {
+                let items = args.to_vec();
+                if items.len() >= 2 {
+                    if let (Some(handle), Some(sql)) = (get_string(&items[0]), get_string(&items[1])) {
+                        // Get connection from thread-local storage
+                        let result = DB_CONNECTIONS.with(|conns| {
+                            if let Some(conn_arc) = conns.borrow().get(&handle) {
+                                if let Ok(conn) = conn_arc.lock() {
+                                    // Execute query
+                                    if let Ok(mut stmt) = conn.prepare(&sql) {
+                                        let column_count = stmt.column_count();
+                                        let mut rows: Vec<Term> = Vec::new();
+
+                                        if let Ok(mut query_rows) = stmt.query([]) {
+                                            while let Ok(Some(row)) = query_rows.next() {
+                                                let mut row_values: Vec<Term> = Vec::new();
+                                                for i in 0..column_count {
+                                                    // Handle different SQLite value types
+                                                    let value_ref = row.get_ref(i).ok();
+                                                    let term = match value_ref {
+                                                        Some(rusqlite::types::ValueRef::Integer(n)) =>
+                                                            Term::typed_literal(n.to_string(), "http://www.w3.org/2001/XMLSchema#integer"),
+                                                        Some(rusqlite::types::ValueRef::Real(f)) =>
+                                                            Term::typed_literal(f.to_string(), "http://www.w3.org/2001/XMLSchema#decimal"),
+                                                        Some(rusqlite::types::ValueRef::Text(s)) =>
+                                                            Term::Literal(std::sync::Arc::new(
+                                                                crate::term::Literal::plain(String::from_utf8_lossy(s).to_string())
+                                                            )),
+                                                        Some(rusqlite::types::ValueRef::Blob(b)) =>
+                                                            Term::Literal(std::sync::Arc::new(
+                                                                crate::term::Literal::plain(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b))
+                                                            )),
+                                                        Some(rusqlite::types::ValueRef::Null) | None =>
+                                                            Term::Literal(std::sync::Arc::new(
+                                                                crate::term::Literal::plain("".to_string())
+                                                            )),
+                                                    };
+                                                    row_values.push(term);
+                                                }
+                                                rows.push(Term::list(row_values));
+                                            }
+                                        }
+                                        return Some(Term::list(rows));
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        if let Some(result_term) = result {
+                            if let Term::Variable(var) = object {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), result_term);
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                        return BuiltinResult::Failure;
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // db:execute - (handle "SQL") db:execute rowcount
+        // Executes a SQL statement and returns affected row count
+        self.register(&format!("{}execute", ns::DB), |subject, object, bindings| {
+            if let Term::List(args) = subject {
+                let items = args.to_vec();
+                if items.len() >= 2 {
+                    if let (Some(handle), Some(sql)) = (get_string(&items[0]), get_string(&items[1])) {
+                        let result = DB_CONNECTIONS.with(|conns| {
+                            if let Some(conn_arc) = conns.borrow().get(&handle) {
+                                if let Ok(conn) = conn_arc.lock() {
+                                    if let Ok(count) = conn.execute(&sql, []) {
+                                        return Some(count as f64);
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        if let Some(count) = result {
+                            return match_or_bind(object, count, bindings);
+                        }
+                        return BuiltinResult::Failure;
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // db:tables - handle db:tables tableList
+        // Returns list of table names in the database
+        self.register(&format!("{}tables", ns::DB), |subject, object, bindings| {
+            if let Some(handle) = get_string(&subject) {
+                let result = DB_CONNECTIONS.with(|conns| {
+                    if let Some(conn_arc) = conns.borrow().get(&handle) {
+                        if let Ok(conn) = conn_arc.lock() {
+                            let sql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+                            if let Ok(mut stmt) = conn.prepare(sql) {
+                                let mut tables: Vec<Term> = Vec::new();
+                                if let Ok(mut rows) = stmt.query([]) {
+                                    while let Ok(Some(row)) = rows.next() {
+                                        let name: String = row.get(0).unwrap_or_default();
+                                        tables.push(Term::Literal(std::sync::Arc::new(
+                                            crate::term::Literal::plain(name)
+                                        )));
+                                    }
+                                }
+                                return Some(Term::list(tables));
+                            }
+                        }
+                    }
+                    None
+                });
+
+                if let Some(tables_term) = result {
+                    if let Term::Variable(var) = object {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(var.clone(), tables_term);
+                        return BuiltinResult::Success(new_bindings);
+                    }
+                    return BuiltinResult::Success(bindings.clone());
+                }
+                return BuiltinResult::Failure;
+            }
+            BuiltinResult::NotReady
+        });
+
+        // db:columns - (handle "tableName") db:columns columnList
+        // Returns list of column names for a table
+        self.register(&format!("{}columns", ns::DB), |subject, object, bindings| {
+            if let Term::List(args) = subject {
+                let items = args.to_vec();
+                if items.len() >= 2 {
+                    if let (Some(handle), Some(table)) = (get_string(&items[0]), get_string(&items[1])) {
+                        let result = DB_CONNECTIONS.with(|conns| {
+                            if let Some(conn_arc) = conns.borrow().get(&handle) {
+                                if let Ok(conn) = conn_arc.lock() {
+                                    let sql = format!("PRAGMA table_info({})", table);
+                                    if let Ok(mut stmt) = conn.prepare(&sql) {
+                                        let mut columns: Vec<Term> = Vec::new();
+                                        if let Ok(mut rows) = stmt.query([]) {
+                                            while let Ok(Some(row)) = rows.next() {
+                                                let name: String = row.get(1).unwrap_or_default();
+                                                columns.push(Term::Literal(std::sync::Arc::new(
+                                                    crate::term::Literal::plain(name)
+                                                )));
+                                            }
+                                        }
+                                        return Some(Term::list(columns));
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        if let Some(columns_term) = result {
+                            if let Term::Variable(var) = object {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), columns_term);
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                        return BuiltinResult::Failure;
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // db:close - handle db:close true
+        // Closes a database connection
+        self.register(&format!("{}close", ns::DB), |subject, object, bindings| {
+            if let Some(handle) = get_string(&subject) {
+                let removed = DB_CONNECTIONS.with(|conns| {
+                    conns.borrow_mut().remove(&handle).is_some()
+                });
+
+                if removed {
+                    let true_term = Term::typed_literal("true".to_string(), "http://www.w3.org/2001/XMLSchema#boolean");
+                    if let Term::Variable(var) = object {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(var.clone(), true_term);
+                        return BuiltinResult::Success(new_bindings);
+                    }
+                    return BuiltinResult::Success(bindings.clone());
+                }
+                return BuiltinResult::Failure;
+            }
+            BuiltinResult::NotReady
+        });
+
+        // db:insertRow - (handle "table" (col1 col2 ...) (val1 val2 ...)) db:insertRow rowid
+        // Inserts a row into a table
+        self.register(&format!("{}insertRow", ns::DB), |subject, object, bindings| {
+            if let Term::List(args) = subject {
+                let items = args.to_vec();
+                if items.len() >= 4 {
+                    if let (Some(handle), Some(table)) = (get_string(&items[0]), get_string(&items[1])) {
+                        // Get column names
+                        let columns: Vec<String> = if let Term::List(cols) = &items[2] {
+                            cols.to_vec().iter().filter_map(|t| get_string(t)).collect()
+                        } else {
+                            return BuiltinResult::NotReady;
+                        };
+
+                        // Get values
+                        let values: Vec<String> = if let Term::List(vals) = &items[3] {
+                            vals.to_vec().iter().filter_map(|t| get_string(t)).collect()
+                        } else {
+                            return BuiltinResult::NotReady;
+                        };
+
+                        if columns.len() != values.len() {
+                            return BuiltinResult::Failure;
+                        }
+
+                        let result = DB_CONNECTIONS.with(|conns| {
+                            if let Some(conn_arc) = conns.borrow().get(&handle) {
+                                if let Ok(conn) = conn_arc.lock() {
+                                    let col_str = columns.join(", ");
+                                    let placeholders: Vec<&str> = values.iter().map(|_| "?").collect();
+                                    let sql = format!(
+                                        "INSERT INTO {} ({}) VALUES ({})",
+                                        table, col_str, placeholders.join(", ")
+                                    );
+
+                                    // Create params as strings
+                                    let params: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+                                    if let Ok(mut stmt) = conn.prepare(&sql) {
+                                        if stmt.execute(rusqlite::params_from_iter(&params)).is_ok() {
+                                            return Some(conn.last_insert_rowid() as f64);
+                                        }
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        if let Some(rowid) = result {
+                            return match_or_bind(object, rowid, bindings);
+                        }
+                        return BuiltinResult::Failure;
+                    }
+                }
+            }
+            BuiltinResult::NotReady
+        });
+
+        // db:selectWhere - (handle "table" "whereClause") db:selectWhere results
+        // Selects rows matching a WHERE clause
+        self.register(&format!("{}selectWhere", ns::DB), |subject, object, bindings| {
+            if let Term::List(args) = subject {
+                let items = args.to_vec();
+                if items.len() >= 3 {
+                    if let (Some(handle), Some(table), Some(where_clause)) =
+                        (get_string(&items[0]), get_string(&items[1]), get_string(&items[2])) {
+                        let result = DB_CONNECTIONS.with(|conns| {
+                            if let Some(conn_arc) = conns.borrow().get(&handle) {
+                                if let Ok(conn) = conn_arc.lock() {
+                                    let sql = format!("SELECT * FROM {} WHERE {}", table, where_clause);
+                                    if let Ok(mut stmt) = conn.prepare(&sql) {
+                                        let column_count = stmt.column_count();
+                                        let mut rows: Vec<Term> = Vec::new();
+
+                                        if let Ok(mut query_rows) = stmt.query([]) {
+                                            while let Ok(Some(row)) = query_rows.next() {
+                                                let mut row_values: Vec<Term> = Vec::new();
+                                                for i in 0..column_count {
+                                                    // Handle different SQLite value types
+                                                    let value_ref = row.get_ref(i).ok();
+                                                    let term = match value_ref {
+                                                        Some(rusqlite::types::ValueRef::Integer(n)) =>
+                                                            Term::typed_literal(n.to_string(), "http://www.w3.org/2001/XMLSchema#integer"),
+                                                        Some(rusqlite::types::ValueRef::Real(f)) =>
+                                                            Term::typed_literal(f.to_string(), "http://www.w3.org/2001/XMLSchema#decimal"),
+                                                        Some(rusqlite::types::ValueRef::Text(s)) =>
+                                                            Term::Literal(std::sync::Arc::new(
+                                                                crate::term::Literal::plain(String::from_utf8_lossy(s).to_string())
+                                                            )),
+                                                        Some(rusqlite::types::ValueRef::Blob(b)) =>
+                                                            Term::Literal(std::sync::Arc::new(
+                                                                crate::term::Literal::plain(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b))
+                                                            )),
+                                                        Some(rusqlite::types::ValueRef::Null) | None =>
+                                                            Term::Literal(std::sync::Arc::new(
+                                                                crate::term::Literal::plain("".to_string())
+                                                            )),
+                                                    };
+                                                    row_values.push(term);
+                                                }
+                                                rows.push(Term::list(row_values));
+                                            }
+                                        }
+                                        return Some(Term::list(rows));
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        if let Some(result_term) = result {
+                            if let Term::Variable(var) = object {
+                                let mut new_bindings = bindings.clone();
+                                new_bindings.insert(var.clone(), result_term);
+                                return BuiltinResult::Success(new_bindings);
+                            }
+                            return BuiltinResult::Success(bindings.clone());
+                        }
+                        return BuiltinResult::Failure;
                     }
                 }
             }

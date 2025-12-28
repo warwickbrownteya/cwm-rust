@@ -62,6 +62,7 @@ pub mod reasoning;
 pub mod builtins;
 pub mod sparql;
 pub mod fuseki;
+pub mod prover;
 
 // Re-export core traits and types
 pub use crate::core::{
@@ -73,10 +74,10 @@ pub use crate::core::{
 };
 
 // Re-export term types
-pub use term::{Term, Triple, Bindings, Uri, Literal, Datatype, BlankNode, Variable, List, FormulaRef};
+pub use term::{Term, Triple, Bindings, Uri, Literal, Datatype, BlankNode, Variable, List, FormulaRef, set_run_prefix, clear_run_prefix};
 
 // Re-export parser types
-pub use parser::{parse, parse_kif, ParseResult, ParseError, ParserState, Formula, N3Parser};
+pub use parser::{parse, parse_kif, parse_rdfxml, ParseResult, ParseError, ParserState, Formula, N3Parser};
 
 // Re-export store types
 pub use store::Store;

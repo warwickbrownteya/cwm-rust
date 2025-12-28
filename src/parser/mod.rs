@@ -4,11 +4,13 @@
 //! including N3 rules with formula syntax: `{ body } => { head } .`
 //!
 //! Also includes a KIF (Knowledge Interchange Format) parser for logic-based
-//! knowledge representation.
+//! knowledge representation, and an RDF/XML parser.
 
 pub mod kif;
+pub mod rdfxml;
 
 pub use kif::parse_kif;
+pub use rdfxml::parse_rdfxml;
 
 use std::sync::Arc;
 

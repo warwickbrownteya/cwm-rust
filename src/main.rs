@@ -11,7 +11,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indexmap::IndexMap;
 
-use cwm::{Store, Reasoner, ReasonerConfig, parse, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule, List};
+use cwm::{Store, Reasoner, ReasonerConfig, parse, parse_rdfxml, ParseResult, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule, List, set_run_prefix};
+use cwm::term::Variable;
 use cwm::fuseki::FusekiStoreBuilder;
 use cwm::core::TripleStore;
 
@@ -20,10 +21,14 @@ use cwm::core::TripleStore;
 struct N3Options {
     /// Use anonymous blank node syntax (_: convention)
     anon_bnodes: bool,
+    /// Add comments at top about version and base URI
+    add_comments: bool,
     /// Don't use default namespace
     no_default_ns: bool,
-    /// Escape unicode using \u notation
+    /// Escape unicode using \u notation in literals
     escape_unicode: bool,
+    /// Suppress => shorthand for log:implies
+    no_implies_shorthand: bool,
     /// Use identifiers from store
     use_store_ids: bool,
     /// Don't use list syntax (..)
@@ -38,6 +43,13 @@ struct N3Options {
     explicit_subject: bool,
     /// No special syntax (= and ())
     no_special: bool,
+    /// Use \u for unicode escaping in URIs (vs utf-8 %XX)
+    unicode_uris: bool,
+    /// Use "this log:forAll" for @forAll, "this log:forSome" for @forSome
+    verbose_quantifiers: bool,
+    // Input flag (parsed from same --n3= option)
+    /// 'B' - Turn blank nodes into existentially quantified named nodes (skolemize)
+    existential_bnodes: bool,
 }
 
 impl N3Options {
@@ -46,8 +58,10 @@ impl N3Options {
         for c in flags.chars() {
             match c {
                 'a' => opts.anon_bnodes = true,
+                'c' => opts.add_comments = true,
                 'd' => opts.no_default_ns = true,
                 'e' => opts.escape_unicode = true,
+                'g' => opts.no_implies_shorthand = true,
                 'i' => opts.use_store_ids = true,
                 'l' => opts.no_list_syntax = true,
                 'n' => opts.no_numeric = true,
@@ -55,6 +69,10 @@ impl N3Options {
                 'r' => opts.no_relative = true,
                 's' => opts.explicit_subject = true,
                 't' => opts.no_special = true,
+                'u' => opts.unicode_uris = true,
+                'v' => opts.verbose_quantifiers = true,
+                // Input flags
+                'B' => opts.existential_bnodes = true,
                 _ => {}
             }
         }
@@ -157,6 +175,10 @@ struct Cli {
     #[arg(long)]
     filter: bool,
 
+    /// Apply rules and replace store with conclusions only (CWM --filter=file)
+    #[arg(long = "filter-rules", value_name = "FILE")]
+    filter_rules: Vec<PathBuf>,
+
     /// Maximum number of inference steps (0 for unlimited)
     #[arg(long, default_value = "10000")]
     max_steps: usize,
@@ -201,7 +223,9 @@ struct Cli {
     #[arg(long = "purge-builtins")]
     purge_builtins: bool,
 
-    /// Operating mode: r=read, w=write, t=think, f=filter
+    /// Operating mode: r=remote (HTTP fetch), s=schema (read schema for predicates),
+    /// a=auto-rules (load rules from schema), E=ignore schema errors,
+    /// m=merge schemas to meta, u=unique run IDs, t=think, f=filter
     #[arg(long = "mode", value_name = "MODE")]
     mode: Option<String>,
 
@@ -273,9 +297,10 @@ struct Cli {
     #[arg(long = "sparql-results", value_name = "FORMAT", default_value = "xml")]
     sparql_results: String,
 
-    /// N3 output flags: a=anon bnodes, d=no default ns, e=escape unicode,
-    /// i=use store ids, l=no list syntax, n=no numeric, p=no prefix,
-    /// r=no relative URIs, s=explicit subject, t=no special syntax
+    /// N3 output flags: a=anon bnodes, c=version comments, d=no default ns,
+    /// e=escape unicode, g=no => shorthand, i=use store ids, l=no list syntax,
+    /// n=no numeric, p=no prefix, r=no relative URIs, s=explicit subject,
+    /// t=no special syntax, u=unicode URIs, v=verbose quantifiers
     #[arg(long = "n3", value_name = "FLAGS")]
     n3_flags: Option<String>,
 
@@ -333,6 +358,10 @@ struct Cli {
     /// Batch size for Fuseki bulk operations (default: 1000)
     #[arg(long = "fuseki-batch", value_name = "SIZE", default_value = "1000")]
     fuseki_batch: usize,
+
+    /// Use reasoning engine (otter, prover9, dpll, cdcl, leancop, nanocop, tableau, superposition, smt, dl-tableau, knuth-bendix)
+    #[arg(long = "engine", value_name = "ENGINE")]
+    engine: Option<String>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -360,6 +389,723 @@ fn parse_language(lang: &str) -> Option<OutputFormat> {
     }
 }
 
+/// Fetch content from a URL using HTTP
+fn fetch_url(url: &str) -> Result<String> {
+    let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+        .with_context(|| format!("Failed to fetch URL: {}", url))?;
+
+    if response.status() != 200 {
+        return Err(anyhow::anyhow!("HTTP {} fetching {}", response.status(), url));
+    }
+
+    let content = response.into_string()
+        .with_context(|| format!("Failed to read content from {}", url))?;
+
+    Ok(content)
+}
+
+/// Check if a path looks like a URL
+fn is_url(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://")
+}
+
+/// Check if content appears to be RDF/XML format
+fn is_rdfxml_content(content: &str) -> bool {
+    let trimmed = content.trim().trim_start_matches('\u{feff}');
+
+    // Check for XML declaration
+    if trimmed.starts_with("<?xml") {
+        // Look for rdf:RDF element
+        return trimmed.contains("<rdf:RDF") ||
+               trimmed.contains("xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"");
+    }
+
+    // Check for rdf:RDF without XML declaration
+    if trimmed.starts_with("<rdf:RDF") {
+        return true;
+    }
+
+    // Check for any element with rdf namespace
+    if trimmed.starts_with('<') && trimmed.contains("xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"") {
+        return true;
+    }
+
+    false
+}
+
+/// Load content from either a local file or a URL (if remote mode enabled)
+fn load_content(path: &std::path::Path, allow_remote: bool) -> Result<String> {
+    let path_str = path.to_string_lossy();
+
+    if is_url(&path_str) {
+        if !allow_remote {
+            return Err(anyhow::anyhow!(
+                "Remote URL {} specified but remote mode not enabled (use --mode=r)",
+                path_str
+            ));
+        }
+        fetch_url(&path_str)
+    } else {
+        fs::read_to_string(path)
+            .with_context(|| format!("Failed to read file: {}", path.display()))
+    }
+}
+
+/// Skolemize blank nodes in triples, converting them to existentially quantified URIs.
+/// This implements the --n3=B flag behavior.
+fn skolemize_triples(triples: Vec<Triple>) -> Vec<Triple> {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SKOLEM_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    // Map blank nodes by their label (for labeled bnodes) or internal id (for anonymous)
+    let mut label_map: HashMap<String, Term> = HashMap::new();
+    let mut id_map: HashMap<u64, Term> = HashMap::new();
+
+    fn skolemize_term(
+        term: &Term,
+        label_map: &mut HashMap<String, Term>,
+        id_map: &mut HashMap<u64, Term>,
+        counter: &AtomicU64
+    ) -> Term {
+        if let Term::BlankNode(bn) = term {
+            // Use label for consistency if available, otherwise fall back to internal id
+            if let Some(label) = bn.label() {
+                if let Some(skolem) = label_map.get(label) {
+                    return skolem.clone();
+                }
+                // Create skolem URI based on the label
+                let skolem_uri = format!("urn:uuid:skolem-{}", label);
+                let skolem = Term::uri(&skolem_uri);
+                label_map.insert(label.to_string(), skolem.clone());
+                skolem
+            } else {
+                // Anonymous blank node - use internal id
+                let id = bn.id();
+                if let Some(skolem) = id_map.get(&id) {
+                    return skolem.clone();
+                }
+                let c = counter.fetch_add(1, Ordering::SeqCst);
+                let skolem_uri = format!("urn:uuid:skolem-anon-{}", c);
+                let skolem = Term::uri(&skolem_uri);
+                id_map.insert(id, skolem.clone());
+                skolem
+            }
+        } else {
+            term.clone()
+        }
+    }
+
+    triples.into_iter().map(|triple| {
+        let subject = skolemize_term(&triple.subject, &mut label_map, &mut id_map, &SKOLEM_COUNTER);
+        let predicate = triple.predicate.clone(); // Predicates shouldn't be blank nodes
+        let object = skolemize_term(&triple.object, &mut label_map, &mut id_map, &SKOLEM_COUNTER);
+        Triple::new(subject, predicate, object)
+    }).collect()
+}
+
+/// Skolemize blank nodes in rules
+fn skolemize_rules(rules: Vec<Rule>) -> Vec<Rule> {
+    rules.into_iter().map(|rule| {
+        let antecedent = skolemize_triples(rule.antecedent.clone());
+        let consequent = skolemize_triples(rule.consequent.clone());
+        Rule::new(antecedent, consequent)
+    }).collect()
+}
+
+/// Result of loading schemas for predicates
+struct SchemaLoadResult {
+    triples: Vec<Triple>,
+    loaded_uris: Vec<String>,
+}
+
+/// Load schemas for all predicates used in the store (mode 's')
+fn load_schemas_for_predicates(
+    store: &Store,
+    prefixes: &mut IndexMap<String, String>,
+    allow_remote: bool,
+    ignore_errors: bool,
+    verbose: bool,
+) -> SchemaLoadResult {
+    use std::collections::HashSet;
+
+    let mut loaded_uris: HashSet<String> = HashSet::new();
+    let mut all_triples = Vec::new();
+
+    // Collect all unique predicate URIs
+    let mut predicate_uris: HashSet<String> = HashSet::new();
+    for triple in store.iter() {
+        if let Term::Uri(uri) = &triple.predicate {
+            predicate_uris.insert(uri.as_str().to_string());
+        }
+    }
+
+    // For each predicate, try to load its namespace/schema
+    for uri in predicate_uris {
+        // Extract namespace (everything before the last # or /)
+        let namespace = if let Some(pos) = uri.rfind('#') {
+            &uri[..=pos]
+        } else if let Some(pos) = uri.rfind('/') {
+            &uri[..=pos]
+        } else {
+            continue;
+        };
+
+        if loaded_uris.contains(namespace) {
+            continue;
+        }
+
+        if verbose {
+            eprintln!("Loading schema from: {}", namespace);
+        }
+
+        // Try to load the schema
+        let content = if allow_remote && (namespace.starts_with("http://") || namespace.starts_with("https://")) {
+            match fetch_url(namespace) {
+                Ok(c) => c,
+                Err(e) => {
+                    if !ignore_errors && verbose {
+                        eprintln!("Warning: Failed to load schema {}: {}", namespace, e);
+                    }
+                    continue;
+                }
+            }
+        } else {
+            // Can't load non-HTTP URIs without remote mode
+            continue;
+        };
+
+        // Parse the schema
+        let parse_result = if is_rdfxml_content(&content) {
+            match parse_rdfxml(&content) {
+                Ok(r) => Some((r.triples, r.prefixes)),
+                Err(e) => {
+                    if !ignore_errors && verbose {
+                        eprintln!("Warning: Failed to parse schema {}: {}", namespace, e);
+                    }
+                    None
+                }
+            }
+        } else {
+            match parse(&content) {
+                Ok(r) => Some((r.triples, r.prefixes)),
+                Err(e) => {
+                    if !ignore_errors && verbose {
+                        eprintln!("Warning: Failed to parse schema {}: {}", namespace, e);
+                    }
+                    None
+                }
+            }
+        };
+
+        if let Some((triples, schema_prefixes)) = parse_result {
+            loaded_uris.insert(namespace.to_string());
+            all_triples.extend(triples);
+            prefixes.extend(schema_prefixes);
+        }
+    }
+
+    SchemaLoadResult {
+        triples: all_triples,
+        loaded_uris: loaded_uris.into_iter().collect(),
+    }
+}
+
+/// Generate inference rules from RDFS/OWL schema definitions (mode 'a')
+fn generate_schema_rules(schema_triples: &[Triple]) -> Vec<Rule> {
+    let mut rules = Vec::new();
+
+    let rdfs_subclass = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    let rdfs_subproperty = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
+    let rdfs_domain = "http://www.w3.org/2000/01/rdf-schema#domain";
+    let rdfs_range = "http://www.w3.org/2000/01/rdf-schema#range";
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+    for triple in schema_triples {
+        if let Term::Uri(pred) = &triple.predicate {
+            let pred_str = pred.as_str();
+
+            // rdfs:subClassOf => { ?x a :SubClass } => { ?x a :SuperClass }
+            if pred_str == rdfs_subclass {
+                if let (Term::Uri(_sub), Term::Uri(_super)) = (&triple.subject, &triple.object) {
+                    let x = Term::Variable(Variable::universal("x".to_string()));
+                    let antecedent = vec![Triple::new(
+                        x.clone(),
+                        Term::uri(rdf_type),
+                        triple.subject.clone(),
+                    )];
+                    let consequent = vec![Triple::new(
+                        x,
+                        Term::uri(rdf_type),
+                        triple.object.clone(),
+                    )];
+                    rules.push(Rule::new(antecedent, consequent));
+                }
+            }
+
+            // rdfs:subPropertyOf => { ?x :subProp ?y } => { ?x :superProp ?y }
+            if pred_str == rdfs_subproperty {
+                if let (Term::Uri(_sub), Term::Uri(_super)) = (&triple.subject, &triple.object) {
+                    let x = Term::Variable(Variable::universal("x".to_string()));
+                    let y = Term::Variable(Variable::universal("y".to_string()));
+                    let antecedent = vec![Triple::new(
+                        x.clone(),
+                        triple.subject.clone(),
+                        y.clone(),
+                    )];
+                    let consequent = vec![Triple::new(
+                        x,
+                        triple.object.clone(),
+                        y,
+                    )];
+                    rules.push(Rule::new(antecedent, consequent));
+                }
+            }
+
+            // rdfs:domain => { ?x :prop ?y } => { ?x a :DomainClass }
+            if pred_str == rdfs_domain {
+                if let (Term::Uri(_prop), Term::Uri(_domain)) = (&triple.subject, &triple.object) {
+                    let x = Term::Variable(Variable::universal("x".to_string()));
+                    let y = Term::Variable(Variable::universal("y".to_string()));
+                    let antecedent = vec![Triple::new(
+                        x.clone(),
+                        triple.subject.clone(),
+                        y,
+                    )];
+                    let consequent = vec![Triple::new(
+                        x,
+                        Term::uri(rdf_type),
+                        triple.object.clone(),
+                    )];
+                    rules.push(Rule::new(antecedent, consequent));
+                }
+            }
+
+            // rdfs:range => { ?x :prop ?y } => { ?y a :RangeClass }
+            if pred_str == rdfs_range {
+                if let (Term::Uri(_prop), Term::Uri(_range)) = (&triple.subject, &triple.object) {
+                    let x = Term::Variable(Variable::universal("x".to_string()));
+                    let y = Term::Variable(Variable::universal("y".to_string()));
+                    let antecedent = vec![Triple::new(
+                        x,
+                        triple.subject.clone(),
+                        y.clone(),
+                    )];
+                    let consequent = vec![Triple::new(
+                        y,
+                        Term::uri(rdf_type),
+                        triple.object.clone(),
+                    )];
+                    rules.push(Rule::new(antecedent, consequent));
+                }
+            }
+        }
+    }
+
+    rules
+}
+
+/// Supported external reasoning engines
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ReasoningEngine {
+    /// Otter theorem prover
+    Otter,
+    /// Prover9 (Otter successor)
+    Prover9,
+    /// DPLL SAT solver
+    Dpll,
+    /// CDCL SAT solver with conflict learning
+    Cdcl,
+    /// leanCoP connection prover
+    LeanCop,
+    /// nanoCoP non-clausal connection prover
+    NanoCop,
+    /// Analytic Tableau prover
+    Tableau,
+    /// Superposition prover
+    Superposition,
+    /// DPLL(T) SMT solver
+    Smt,
+    /// Description Logic Tableau reasoner
+    DlTableau,
+    /// Knuth-Bendix completion
+    KnuthBendix,
+}
+
+impl ReasoningEngine {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "otter" => Some(ReasoningEngine::Otter),
+            "prover9" => Some(ReasoningEngine::Prover9),
+            "dpll" | "sat" => Some(ReasoningEngine::Dpll),
+            "cdcl" => Some(ReasoningEngine::Cdcl),
+            "leancop" | "lean-cop" => Some(ReasoningEngine::LeanCop),
+            "nanocop" | "nano-cop" => Some(ReasoningEngine::NanoCop),
+            "tableau" => Some(ReasoningEngine::Tableau),
+            "superposition" | "super" => Some(ReasoningEngine::Superposition),
+            "smt" | "dpll-t" => Some(ReasoningEngine::Smt),
+            "dl-tableau" | "dl" | "owl" => Some(ReasoningEngine::DlTableau),
+            "knuth-bendix" | "kb" | "completion" => Some(ReasoningEngine::KnuthBendix),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn command(&self) -> &'static str {
+        match self {
+            ReasoningEngine::Otter => "otter",
+            ReasoningEngine::Prover9 => "prover9",
+            ReasoningEngine::Dpll => "dpll",
+            ReasoningEngine::Cdcl => "cdcl",
+            ReasoningEngine::LeanCop => "leancop",
+            ReasoningEngine::NanoCop => "nanocop",
+            ReasoningEngine::Tableau => "tableau",
+            ReasoningEngine::Superposition => "superposition",
+            ReasoningEngine::Smt => "smt",
+            ReasoningEngine::DlTableau => "dl-tableau",
+            ReasoningEngine::KnuthBendix => "knuth-bendix",
+        }
+    }
+
+    /// List all available engines
+    fn available() -> &'static [&'static str] {
+        &[
+            "otter", "prover9", "dpll", "cdcl", "leancop", "nanocop",
+            "tableau", "superposition", "smt", "dl-tableau", "knuth-bendix"
+        ]
+    }
+}
+
+/// Convert a Term to Prover9/Otter format
+fn term_to_prover9(term: &Term) -> String {
+    match term {
+        Term::Uri(uri) => {
+            // Convert URI to a valid Prover9 identifier
+            // Replace special characters with underscores
+            let s = uri.as_str();
+            let cleaned: String = s.chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                .collect();
+            format!("uri_{}", cleaned)
+        }
+        Term::Literal(lit) => {
+            // Convert literal to quoted string representation
+            let val = lit.value().replace('\\', "\\\\").replace('"', "\\\"");
+            format!("lit_\"{}\"", val)
+        }
+        Term::BlankNode(bn) => {
+            format!("bnode_{}", bn.id())
+        }
+        Term::Variable(var) => {
+            // Prover9 variables must start with lowercase for existential, uppercase for universal
+            let name = var.name();
+            if var.is_universal() {
+                // Universal variables use uppercase
+                format!("{}", name.to_uppercase())
+            } else {
+                // Existential variables use lowercase
+                format!("{}", name.to_lowercase())
+            }
+        }
+        Term::List(_) => "list_nil".to_string(), // Simplified
+        Term::Formula(_) => "formula".to_string(), // Simplified
+    }
+}
+
+/// Convert triples to Prover9 format (facts)
+fn triples_to_prover9(triples: &[Triple]) -> String {
+    let mut output = String::new();
+    output.push_str("formulas(assumptions).\n");
+
+    for triple in triples {
+        let subj = term_to_prover9(&triple.subject);
+        let pred = term_to_prover9(&triple.predicate);
+        let obj = term_to_prover9(&triple.object);
+
+        // Express triple as: triple(subject, predicate, object)
+        output.push_str(&format!("  triple({}, {}, {}).\n", subj, pred, obj));
+    }
+
+    output.push_str("end_of_list.\n\n");
+    output
+}
+
+/// Convert rules to Prover9 format (implications)
+fn rules_to_prover9(rules: &[Rule]) -> String {
+    let mut output = String::new();
+
+    if rules.is_empty() {
+        return output;
+    }
+
+    output.push_str("formulas(assumptions).\n");
+
+    for rule in rules {
+        // Convert: { antecedent } => { consequent }
+        // To: (all vars) antecedent -> consequent
+
+        let mut ant_parts = Vec::new();
+        for triple in &rule.antecedent {
+            let subj = term_to_prover9(&triple.subject);
+            let pred = term_to_prover9(&triple.predicate);
+            let obj = term_to_prover9(&triple.object);
+            ant_parts.push(format!("triple({}, {}, {})", subj, pred, obj));
+        }
+
+        let mut con_parts = Vec::new();
+        for triple in &rule.consequent {
+            let subj = term_to_prover9(&triple.subject);
+            let pred = term_to_prover9(&triple.predicate);
+            let obj = term_to_prover9(&triple.object);
+            con_parts.push(format!("triple({}, {}, {})", subj, pred, obj));
+        }
+
+        if !ant_parts.is_empty() && !con_parts.is_empty() {
+            let antecedent = if ant_parts.len() == 1 {
+                ant_parts[0].clone()
+            } else {
+                format!("({})", ant_parts.join(" & "))
+            };
+
+            let consequent = if con_parts.len() == 1 {
+                con_parts[0].clone()
+            } else {
+                format!("({})", con_parts.join(" & "))
+            };
+
+            output.push_str(&format!("  {} -> {}.\n", antecedent, consequent));
+        }
+    }
+
+    output.push_str("end_of_list.\n\n");
+    output
+}
+
+/// Create Prover9 input file content
+fn create_prover9_input(triples: &[Triple], rules: &[Rule], goals: Option<&[Triple]>) -> String {
+    let mut output = String::new();
+
+    // Add facts
+    output.push_str(&triples_to_prover9(triples));
+
+    // Add rules
+    output.push_str(&rules_to_prover9(rules));
+
+    // Add goals if provided
+    if let Some(goal_triples) = goals {
+        output.push_str("formulas(goals).\n");
+        for triple in goal_triples {
+            let subj = term_to_prover9(&triple.subject);
+            let pred = term_to_prover9(&triple.predicate);
+            let obj = term_to_prover9(&triple.object);
+            output.push_str(&format!("  triple({}, {}, {}).\n", subj, pred, obj));
+        }
+        output.push_str("end_of_list.\n");
+    }
+
+    output
+}
+
+/// Run native Rust prover engine and return results
+fn run_prover_engine(
+    engine: ReasoningEngine,
+    triples: &[Triple],
+    rules: &[Rule],
+    verbose: bool,
+) -> Result<Vec<Triple>> {
+    use cwm::prover::{OtterProver, Prover9, ProverConfig, Prover9Config, ProofResult, Derivation};
+    use cwm::prover::leancop::{LeanCop, LeanCopConfig, LeanCopResult};
+    use cwm::prover::superposition::{SuperpositionProver, SuperpositionConfig};
+    use cwm::prover::dl_tableau::DlTableauConfig;
+
+    // Create input in Prover9 format (our native provers understand this format)
+    let input_content = create_prover9_input(triples, rules, None);
+
+    if verbose {
+        eprintln!("=== Prover Input ===");
+        eprintln!("{}", input_content);
+        eprintln!("====================");
+    }
+
+    // Handle engines that use the Prover9 input format
+    match engine {
+        ReasoningEngine::Otter | ReasoningEngine::Prover9 |
+        ReasoningEngine::LeanCop | ReasoningEngine::Superposition => {
+            // These engines use standard first-order logic input
+        }
+        ReasoningEngine::Dpll | ReasoningEngine::Cdcl => {
+            // SAT solvers - need CNF input
+            if verbose {
+                eprintln!("SAT solver engines require propositional CNF input");
+                eprintln!("Use for propositional satisfiability problems");
+            }
+            return Ok(Vec::new());
+        }
+        ReasoningEngine::NanoCop | ReasoningEngine::Tableau => {
+            // These work on formula level
+            if verbose {
+                eprintln!("Non-clausal provers - work on formula level");
+            }
+        }
+        ReasoningEngine::Smt => {
+            if verbose {
+                eprintln!("SMT solver - for satisfiability modulo theories");
+            }
+            return Ok(Vec::new());
+        }
+        ReasoningEngine::DlTableau => {
+            if verbose {
+                eprintln!("DL Tableau - for description logic reasoning");
+            }
+            return Ok(Vec::new());
+        }
+        ReasoningEngine::KnuthBendix => {
+            if verbose {
+                eprintln!("Knuth-Bendix - for equational reasoning and term rewriting");
+            }
+            return Ok(Vec::new());
+        }
+    }
+
+    // Run the appropriate native prover
+    let result = match engine {
+        ReasoningEngine::Otter => {
+            let config = ProverConfig {
+                max_clauses: 10000,
+                max_seconds: 60,
+                max_weight: 100,
+                set_of_support: true,
+                ordered_resolution: false,
+                hyperresolution: false,
+                paramodulation: true,
+                demodulation: true,
+                verbose,
+            };
+            let mut prover = OtterProver::with_config(config);
+
+            if let Err(e) = prover.parse_input(&input_content) {
+                return Err(anyhow::anyhow!("Failed to parse input for Otter: {}", e));
+            }
+
+            prover.prove()
+        }
+        ReasoningEngine::Prover9 => {
+            let config = Prover9Config {
+                base: ProverConfig {
+                    max_clauses: 10000,
+                    max_seconds: 60,
+                    max_weight: 100,
+                    set_of_support: true,
+                    ordered_resolution: true,
+                    hyperresolution: false,
+                    paramodulation: true,
+                    demodulation: true,
+                    verbose,
+                },
+                ..Default::default()
+            };
+            let mut prover = Prover9::with_config(config);
+
+            if let Err(e) = prover.parse_input(&input_content) {
+                return Err(anyhow::anyhow!("Failed to parse input for Prover9: {}", e));
+            }
+
+            prover.prove()
+        }
+        ReasoningEngine::LeanCop => {
+            let config = LeanCopConfig {
+                max_depth: 100,
+                max_inferences: 100000,
+                iterative_deepening: true,
+                verbose,
+            };
+            let mut prover = LeanCop::with_config(config);
+
+            if let Err(e) = prover.parse_input(&input_content) {
+                return Err(anyhow::anyhow!("Failed to parse input for leanCoP: {}", e));
+            }
+
+            match prover.prove() {
+                LeanCopResult::Proved { inferences, depth } => {
+                    if verbose {
+                        eprintln!("=== leanCoP: THEOREM PROVED ===");
+                        eprintln!("Inferences: {}, Depth: {}", inferences, depth);
+                    }
+                    return Ok(Vec::new());
+                }
+                LeanCopResult::NotProved { reason } => {
+                    if verbose {
+                        eprintln!("=== leanCoP: NOT PROVED ===");
+                        eprintln!("Reason: {}", reason);
+                    }
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        ReasoningEngine::Superposition => {
+            let config = SuperpositionConfig::default();
+            let mut prover = SuperpositionProver::with_config(config);
+
+            if let Err(e) = prover.parse_input(&input_content) {
+                return Err(anyhow::anyhow!("Failed to parse input for Superposition: {}", e));
+            }
+
+            prover.prove()
+        }
+        _ => {
+            // Other engines handled above
+            return Ok(Vec::new());
+        }
+    };
+
+    // Report results
+    match result {
+        ProofResult::Proved { proof, clauses_generated, resolution_steps } => {
+            if verbose {
+                eprintln!("=== THEOREM PROVED ===");
+                eprintln!("Clauses generated: {}", clauses_generated);
+                eprintln!("Resolution steps: {}", resolution_steps);
+                eprintln!("Proof length: {} steps", proof.len());
+                eprintln!();
+                for step in &proof {
+                    let justification = match &step.derivation {
+                        Derivation::Input => "input".to_string(),
+                        Derivation::Resolution { clause1_id, clause2_id, .. } =>
+                            format!("resolve({}, {})", clause1_id, clause2_id),
+                        Derivation::Factor { clause_id, .. } =>
+                            format!("factor({})", clause_id),
+                        Derivation::Paramodulation { from_clause, into_clause } =>
+                            format!("para({}, {})", from_clause, into_clause),
+                        Derivation::Demodulation { clause_id, demodulator_id } =>
+                            format!("demod({}, {})", clause_id, demodulator_id),
+                    };
+                    eprintln!("  {}. {:?} [{}]", step.step_id, step.clause, justification);
+                }
+                eprintln!("======================");
+            }
+        }
+        ProofResult::Unknown { reason } => {
+            if verbose {
+                eprintln!("=== PROOF NOT FOUND ===");
+                eprintln!("Reason: {}", reason);
+                eprintln!("=======================");
+            }
+        }
+        ProofResult::Satisfiable => {
+            if verbose {
+                eprintln!("=== SATISFIABLE (no contradiction found) ===");
+            }
+        }
+    }
+
+    // The native provers validate theorems but don't generate new triples
+    // For forward-chaining inference, use the standard Reasoner
+    Ok(Vec::new())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -379,15 +1125,52 @@ fn main() -> Result<()> {
         cli.format
     };
 
-    // Parse --mode flags (r=read, w=write, t=think, f=filter)
-    let (mode_think, mode_filter) = if let Some(ref mode) = cli.mode {
+    // Parse --mode flags (r=remote, s=schema, a=auto-rules, E=ignore-errors, m=merge-meta, u=unique-ids, t=think, f=filter)
+    #[derive(Default)]
+    struct ModeFlags {
+        think: bool,
+        filter: bool,
+        remote: bool,      // 'r' - enable remote operations (HTTP fetching)
+        schema: bool,      // 's' - read schema for predicates
+        auto_rules: bool,  // 'a' - auto-load rules from schema
+        ignore_errors: bool, // 'E' - ignore schema errors
+        merge_meta: bool,  // 'm' - merge schemas to meta graph
+        unique_ids: bool,  // 'u' - run-specific unique IDs
+    }
+
+    let mode_flags = if let Some(ref mode) = cli.mode {
         let chars: Vec<char> = mode.chars().collect();
-        let think = chars.contains(&'t');
-        let filter = chars.contains(&'f');
-        (think, filter)
+        ModeFlags {
+            think: chars.contains(&'t'),
+            filter: chars.contains(&'f'),
+            remote: chars.contains(&'r'),
+            schema: chars.contains(&'s'),
+            auto_rules: chars.contains(&'a'),
+            ignore_errors: chars.contains(&'E'),
+            merge_meta: chars.contains(&'m'),
+            unique_ids: chars.contains(&'u'),
+        }
     } else {
-        (false, false)
+        ModeFlags::default()
     };
+
+    let (mode_think, mode_filter) = (mode_flags.think, mode_flags.filter);
+
+    // Parse N3 options early so we can use existential_bnodes during input processing
+    let n3_opts = cli.n3_flags.as_ref().map(|f| N3Options::from_flags(f));
+    let do_skolemize = n3_opts.as_ref().map_or(false, |opts| opts.existential_bnodes);
+
+    // Set run-specific unique ID prefix if mode 'u' is enabled
+    if mode_flags.unique_ids {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let run_prefix = format!("r{}_{}", pid, timestamp);
+        set_run_prefix(run_prefix);
+    }
 
     // Effective think/filter: CLI flags OR --mode
     let effective_think = cli.think || mode_think || !cli.apply.is_empty();
@@ -406,15 +1189,28 @@ fn main() -> Result<()> {
     }
 
     for path in &cli.inputs {
-        let file_content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read file: {}", path.display()))?;
+        let file_content = load_content(path, mode_flags.remote)?;
         content.push_str(&file_content);
         content.push('\n');
     }
 
-    // Parse main input
-    let parse_result = parse(&content)
-        .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
+    // Determine input format and parse
+    let parse_result = if is_rdfxml_content(&content) || cli.language.as_deref() == Some("rdf") {
+        // Parse as RDF/XML
+        let result = parse_rdfxml(&content)
+            .map_err(|e| anyhow::anyhow!("RDF/XML parse error: {}", e))?;
+        ParseResult {
+            triples: result.triples,
+            rules: Vec::new(), // RDF/XML doesn't have rules
+            prefixes: result.prefixes,
+            base: None,
+            formulas: IndexMap::new(),
+        }
+    } else {
+        // Parse as N3/Turtle
+        parse(&content)
+            .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?
+    };
 
     let mut store = Store::new();
 
@@ -448,56 +1244,132 @@ fn main() -> Result<()> {
         None
     };
 
-    store.add_all(parse_result.triples.clone());
+    // Apply skolemization if --n3=B flag is set
+    let initial_triples = if do_skolemize {
+        skolemize_triples(parse_result.triples.clone())
+    } else {
+        parse_result.triples.clone()
+    };
+    let initial_rules = if do_skolemize {
+        skolemize_rules(parse_result.rules.clone())
+    } else {
+        parse_result.rules.clone()
+    };
+    store.add_all(initial_triples);
     all_prefixes.extend(parse_result.prefixes.clone());
-    all_rules.extend(parse_result.rules.clone());
+    all_rules.extend(initial_rules);
 
     // Load data files (no rules extracted)
     for path in &cli.data {
-        let file_content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read data file: {}", path.display()))?;
+        let file_content = load_content(path, mode_flags.remote)?;
         let data_result = parse(&file_content)
             .map_err(|e| anyhow::anyhow!("Parse error in {}: {}", path.display(), e))?;
-        store.add_all(data_result.triples);
+        let data_triples = if do_skolemize {
+            skolemize_triples(data_result.triples)
+        } else {
+            data_result.triples
+        };
+        store.add_all(data_triples);
         all_prefixes.extend(data_result.prefixes);
         // Don't add rules from --data files
     }
 
     // Load rules from --rules files
     for path in &cli.rules {
-        let file_content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read rules file: {}", path.display()))?;
+        let file_content = load_content(path, mode_flags.remote)?;
         let rules_result = parse(&file_content)
             .map_err(|e| anyhow::anyhow!("Parse error in {}: {}", path.display(), e))?;
         all_prefixes.extend(rules_result.prefixes);
-        all_rules.extend(rules_result.rules);
+        let rules_rules = if do_skolemize {
+            skolemize_rules(rules_result.rules)
+        } else {
+            rules_result.rules
+        };
+        all_rules.extend(rules_rules);
         // Also add any triples from rules files
-        store.add_all(rules_result.triples);
+        let rules_triples = if do_skolemize {
+            skolemize_triples(rules_result.triples)
+        } else {
+            rules_result.triples
+        };
+        store.add_all(rules_triples);
     }
 
     // Load rules from --apply files (same as --rules but implies --think)
     // Note: effective_think already accounts for --apply, but we keep should_think for compatibility
-    let should_think = effective_think;
+    let should_think = effective_think || !cli.filter_rules.is_empty();
     for path in &cli.apply {
-        let file_content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read apply file: {}", path.display()))?;
+        let file_content = load_content(path, mode_flags.remote)?;
         let apply_result = parse(&file_content)
             .map_err(|e| anyhow::anyhow!("Parse error in {}: {}", path.display(), e))?;
         all_prefixes.extend(apply_result.prefixes);
-        all_rules.extend(apply_result.rules);
-        store.add_all(apply_result.triples);
+        let apply_rules = if do_skolemize {
+            skolemize_rules(apply_result.rules)
+        } else {
+            apply_result.rules
+        };
+        all_rules.extend(apply_rules);
+        let apply_triples = if do_skolemize {
+            skolemize_triples(apply_result.triples)
+        } else {
+            apply_result.triples
+        };
+        store.add_all(apply_triples);
+    }
+
+    // Load rules from --filter-rules files (apply and replace store with conclusions)
+    let mut filter_rules: Vec<Rule> = Vec::new();
+    for path in &cli.filter_rules {
+        let file_content = load_content(path, mode_flags.remote)?;
+        let filter_result = parse(&file_content)
+            .map_err(|e| anyhow::anyhow!("Parse error in {}: {}", path.display(), e))?;
+        all_prefixes.extend(filter_result.prefixes);
+        let filter_r = if do_skolemize {
+            skolemize_rules(filter_result.rules)
+        } else {
+            filter_result.rules
+        };
+        filter_rules.extend(filter_r);
+        // Don't add triples from filter-rules to the store (they're just rules)
     }
 
     // Apply patch file if specified (insertions and deletions)
     if let Some(patch_path) = &cli.patch {
-        let patch_content = fs::read_to_string(patch_path)
-            .with_context(|| format!("Failed to read patch file: {}", patch_path.display()))?;
+        let patch_content = load_content(patch_path, mode_flags.remote)?;
         apply_patch(&mut store, &patch_content, &mut all_prefixes)?;
     }
 
     // Handle closure flags for automatic imports
     if let Some(closure_flags) = &cli.closure {
         load_closure(&mut store, &mut all_prefixes, &mut all_rules, closure_flags, cli.verbose && !cli.quiet)?;
+    }
+
+    // Handle schema mode flags (s, a, E, m)
+    if mode_flags.schema || mode_flags.auto_rules {
+        let loaded_schemas = load_schemas_for_predicates(
+            &store,
+            &mut all_prefixes,
+            mode_flags.remote,
+            mode_flags.ignore_errors,
+            cli.verbose && !cli.quiet,
+        );
+
+        // Add schema triples to store (or meta store if merge_meta is set)
+        if mode_flags.merge_meta {
+            // For now, just add to main store - meta graph support would need separate handling
+            store.add_all(loaded_schemas.triples.clone());
+        } else {
+            store.add_all(loaded_schemas.triples.clone());
+        }
+
+        // Auto-generate rules from schemas if mode 'a' is set
+        if mode_flags.auto_rules {
+            let schema_rules = generate_schema_rules(&loaded_schemas.triples);
+            if !cli.quiet && cli.verbose && !schema_rules.is_empty() {
+                eprintln!("Generated {} rules from schemas", schema_rules.len());
+            }
+            all_rules.extend(schema_rules);
+        }
     }
 
     // Track original triples for --filter mode
@@ -523,7 +1395,41 @@ fn main() -> Result<()> {
 
     // Run reasoning if requested
     let mut proof_trace = ProofTrace::default();
-    if should_think {
+
+    // Check if external engine is requested
+    if let Some(ref engine_name) = cli.engine {
+        let engine = ReasoningEngine::from_str(engine_name)
+            .ok_or_else(|| anyhow::anyhow!(
+                "Unknown engine '{}'. Supported engines: otter, prover9",
+                engine_name
+            ))?;
+
+        if !cli.quiet {
+            eprintln!("Using external reasoning engine: {:?}", engine);
+        }
+
+        // Get triples from store
+        let triples: Vec<Triple> = store.iter().cloned().collect();
+
+        // Run external prover
+        match run_prover_engine(engine, &triples, &all_rules, cli.verbose && !cli.quiet) {
+            Ok(new_triples) => {
+                // Add any new triples to the store
+                store.add_all(new_triples);
+            }
+            Err(e) => {
+                if !cli.quiet {
+                    eprintln!("Warning: External engine failed: {}", e);
+                }
+                // Fall back to built-in reasoning if engine fails
+                if should_think {
+                    eprintln!("Falling back to built-in reasoning...");
+                }
+            }
+        }
+    }
+
+    if should_think && cli.engine.is_none() {
         let max_steps = if cli.max_steps == 0 { usize::MAX } else { cli.max_steps };
         let config = ReasonerConfig {
             max_steps,
@@ -565,9 +1471,48 @@ fn main() -> Result<()> {
                 }
             }
         }
-    } else if effective_filter {
+    } else if effective_filter && cli.engine.is_none() {
         // --filter without --think: warn user
         eprintln!("Warning: --filter has no effect without --think");
+    }
+
+    // Handle --filter-rules: apply rules and replace store with conclusions only
+    if !filter_rules.is_empty() {
+        let max_steps = if cli.max_steps == 0 { usize::MAX } else { cli.max_steps };
+        let config = ReasonerConfig {
+            max_steps,
+            recursive: true,
+            filter: true, // Always filter for --filter-rules
+            generate_proof: false,
+            enable_tabling: true,
+            enable_crypto: cli.crypto,
+        };
+
+        // Track triples before filter-rules
+        let before_filter: std::collections::HashSet<Triple> = store.iter().cloned().collect();
+
+        let mut reasoner = Reasoner::with_config(config);
+        for rule in &filter_rules {
+            reasoner.add_rule(rule.clone());
+        }
+
+        let stats = reasoner.run(&mut store);
+
+        if !cli.quiet && cli.verbose {
+            eprintln!(
+                "Filter-rules: {} steps, {} rules fired, {} triples derived",
+                stats.steps, stats.rules_fired, stats.triples_derived
+            );
+        }
+
+        // Replace store with only the newly derived triples
+        let mut conclusions_only = Store::new();
+        for triple in store.iter() {
+            if !before_filter.contains(triple) {
+                conclusions_only.add(triple.clone());
+            }
+        }
+        store = conclusions_only;
     }
 
     // Apply filter if requested: output only inferred triples
@@ -677,8 +1622,7 @@ fn main() -> Result<()> {
     // Execute SPARQL query if specified
     if cli.sparql.is_some() || cli.sparql_query.is_some() {
         let query_str = if let Some(query_file) = &cli.sparql {
-            fs::read_to_string(query_file)
-                .with_context(|| format!("Failed to read SPARQL query file: {}", query_file.display()))?
+            load_content(query_file, mode_flags.remote)?
         } else {
             cli.sparql_query.clone().unwrap()
         };
@@ -721,8 +1665,7 @@ fn main() -> Result<()> {
 
     // Execute N3QL query if specified
     if let Some(query_path) = &cli.n3ql_query {
-        let query_content = fs::read_to_string(query_path)
-            .with_context(|| format!("Failed to read N3QL query file: {}", query_path.display()))?;
+        let query_content = load_content(query_path, mode_flags.remote)?;
 
         let result = execute_n3ql(&output_store, &query_content, &all_prefixes)?;
         let result_output = format_n3(&result, &all_prefixes);
@@ -778,10 +1721,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Parse N3 options if specified
-    let n3_opts = cli.n3_flags.as_ref().map(|f| N3Options::from_flags(f));
-
-    // Generate output
+    // Generate output (n3_opts already parsed earlier for input processing)
     let output_content = if cli.strings {
         // --strings mode: output literal values only
         let mut strings = Vec::new();
@@ -2358,7 +3298,24 @@ fn format_diff(additions: &[Triple], deletions: &[Triple], prefixes: &IndexMap<S
 
 /// Format N3 with custom options
 fn format_n3_with_options(store: &Store, prefixes: &IndexMap<String, String>, opts: &N3Options) -> String {
+    format_n3_with_options_and_base(store, prefixes, opts, None)
+}
+
+/// Format N3 with custom options and optional base URI
+fn format_n3_with_options_and_base(store: &Store, prefixes: &IndexMap<String, String>, opts: &N3Options, base_uri: Option<&str>) -> String {
+    use std::collections::HashSet;
+
     let mut output = String::new();
+
+    // Add comments at top if flag 'c' is set
+    if opts.add_comments {
+        output.push_str(&format!("# Generated by cwm-rust version 0.1.0\n"));
+        output.push_str(&format!("# {}\n", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")));
+        if let Some(base) = base_uri {
+            output.push_str(&format!("# Base: {}\n", base));
+        }
+        output.push('\n');
+    }
 
     // Only output prefixes if not suppressed
     if !opts.no_prefix {
@@ -2369,6 +3326,63 @@ fn format_n3_with_options(store: &Store, prefixes: &IndexMap<String, String>, op
             output.push_str(&format!("@prefix {}: <{}> .\n", short, long));
         }
         if !prefixes.is_empty() {
+            output.push('\n');
+        }
+    }
+
+    // Output verbose quantifiers if flag 'v' is set
+    if opts.verbose_quantifiers {
+        let mut universals: HashSet<String> = HashSet::new();
+        let mut existentials: HashSet<String> = HashSet::new();
+
+        fn collect_variables(term: &Term, universals: &mut HashSet<String>, existentials: &mut HashSet<String>) {
+            match term {
+                Term::Variable(v) => {
+                    if v.is_universal() {
+                        universals.insert(v.name().to_string());
+                    } else {
+                        existentials.insert(v.name().to_string());
+                    }
+                }
+                Term::List(list) => {
+                    for item in list.iter() {
+                        collect_variables(item, universals, existentials);
+                    }
+                }
+                Term::Formula(f) => {
+                    for t in f.triples() {
+                        collect_variables(&t.subject, universals, existentials);
+                        collect_variables(&t.predicate, universals, existentials);
+                        collect_variables(&t.object, universals, existentials);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for triple in store.iter() {
+            collect_variables(&triple.subject, &mut universals, &mut existentials);
+            collect_variables(&triple.predicate, &mut universals, &mut existentials);
+            collect_variables(&triple.object, &mut universals, &mut existentials);
+        }
+
+        // Output log:forAll for universal variables
+        if !universals.is_empty() {
+            let mut vars: Vec<_> = universals.iter().collect();
+            vars.sort();
+            let var_list = vars.iter().map(|v| format!("?{}", v)).collect::<Vec<_>>().join(" ");
+            output.push_str(&format!("this log:forAll {} .\n", var_list));
+        }
+
+        // Output log:forSome for existential variables
+        if !existentials.is_empty() {
+            let mut vars: Vec<_> = existentials.iter().collect();
+            vars.sort();
+            let var_list = vars.iter().map(|v| format!("_:{}", v)).collect::<Vec<_>>().join(" ");
+            output.push_str(&format!("this log:forSome {} .\n", var_list));
+        }
+
+        if !universals.is_empty() || !existentials.is_empty() {
             output.push('\n');
         }
     }
@@ -2423,12 +3437,19 @@ fn format_n3_with_options(store: &Store, prefixes: &IndexMap<String, String>, op
 fn format_term_with_options(term: &Term, prefixes: &IndexMap<String, String>, opts: &N3Options) -> String {
     match term {
         Term::Uri(u) => {
+            let uri_str = if opts.unicode_uris {
+                // Use \u escape for non-ASCII in URIs
+                escape_uri_unicode(u.as_str())
+            } else {
+                u.as_str().to_string()
+            };
+
             if opts.no_prefix {
-                format!("<{}>", u.as_str())
+                format!("<{}>", uri_str)
             } else {
                 // Try to use prefix
                 let formatter = N3Formatter::new(prefixes);
-                formatter.compact_uri(u.as_str())
+                formatter.compact_uri(&uri_str)
             }
         }
         Term::Literal(lit) => {
@@ -2462,6 +3483,25 @@ fn format_term_with_options(term: &Term, prefixes: &IndexMap<String, String>, op
             formatter.format_term(term)
         }
     }
+}
+
+/// Escape unicode characters in URIs using \uXXXX notation
+fn escape_uri_unicode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            result.push(c);
+        } else {
+            // Escape non-ASCII as \uXXXX or \UXXXXXXXX
+            let code = c as u32;
+            if code <= 0xFFFF {
+                result.push_str(&format!("\\u{:04X}", code));
+            } else {
+                result.push_str(&format!("\\U{:08X}", code));
+            }
+        }
+    }
+    result
 }
 
 /// Run a SPARQL HTTP endpoint server
