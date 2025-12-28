@@ -13,8 +13,11 @@ use crate::Store;
 pub enum Query {
     Select {
         variables: Vec<String>,
+        projections: Vec<Projection>,
         distinct: bool,
         where_clause: WhereClause,
+        group_by: Option<Vec<String>>,
+        having: Option<FilterExpr>,
         order_by: Option<Vec<OrderCondition>>,
         limit: Option<usize>,
         offset: Option<usize>,
@@ -29,6 +32,32 @@ pub enum Query {
     Describe {
         resources: Vec<Term>,
     },
+}
+
+/// Projection in SELECT clause (variable or aggregate)
+#[derive(Debug, Clone)]
+pub enum Projection {
+    /// Simple variable: ?var
+    Variable(String),
+    /// Aggregate function with optional alias: (COUNT(?x) AS ?count)
+    Aggregate {
+        function: AggregateFunction,
+        variable: Option<String>,
+        alias: Option<String>,
+        distinct: bool,
+    },
+}
+
+/// Aggregate functions
+#[derive(Debug, Clone)]
+pub enum AggregateFunction {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Sample,
+    GroupConcat { separator: Option<String> },
 }
 
 /// WHERE clause containing graph patterns
@@ -54,6 +83,8 @@ pub enum GraphPattern {
     Group(Box<WhereClause>),
     /// SERVICE for federated queries (endpoint URI, patterns, silent flag)
     Service(String, Box<WhereClause>, bool),
+    /// Nested subquery (SELECT inside WHERE)
+    Subquery(Box<Query>),
 }
 
 /// Triple pattern with possible variables
@@ -69,6 +100,29 @@ pub struct TriplePattern {
 pub enum TermPattern {
     Variable(String),
     Term(Term),
+    /// Property path expression (for predicate position)
+    Path(PropertyPath),
+}
+
+/// Property path expressions for SPARQL 1.1
+#[derive(Debug, Clone)]
+pub enum PropertyPath {
+    /// Single predicate (iri)
+    Predicate(Term),
+    /// Inverse path (^path)
+    Inverse(Box<PropertyPath>),
+    /// Sequence path (path1/path2)
+    Sequence(Box<PropertyPath>, Box<PropertyPath>),
+    /// Alternative path (path1|path2)
+    Alternative(Box<PropertyPath>, Box<PropertyPath>),
+    /// Zero or more (*path)
+    ZeroOrMore(Box<PropertyPath>),
+    /// One or more (+path)
+    OneOrMore(Box<PropertyPath>),
+    /// Zero or one (?path)
+    ZeroOrOne(Box<PropertyPath>),
+    /// Negated property set (!(iri1|iri2|...))
+    NegatedSet(Vec<Term>),
 }
 
 /// Filter expressions
@@ -281,12 +335,12 @@ impl<'a> SparqlParser<'a> {
         let distinct = self.try_keyword("DISTINCT");
         self.skip_whitespace();
 
-        // Parse variable list or *
-        let variables = if self.current_char() == '*' {
+        // Parse projections (variables and/or aggregates) or *
+        let (variables, projections) = if self.current_char() == '*' {
             self.pos += 1;
-            Vec::new() // Empty means all variables
+            (Vec::new(), Vec::new()) // Empty means all variables
         } else {
-            self.parse_variable_list()?
+            self.parse_projections()?
         };
 
         self.skip_whitespace();
@@ -298,7 +352,27 @@ impl<'a> SparqlParser<'a> {
 
         let where_clause = self.parse_where_clause()?;
 
-        // Parse modifiers
+        // Parse GROUP BY
+        self.skip_whitespace();
+        let group_by = if self.try_keyword("GROUP") {
+            self.skip_whitespace();
+            if !self.try_keyword("BY") {
+                return Err("Expected BY after GROUP".to_string());
+            }
+            Some(self.parse_group_by_list()?)
+        } else {
+            None
+        };
+
+        // Parse HAVING
+        self.skip_whitespace();
+        let having = if self.try_keyword("HAVING") {
+            Some(self.parse_filter()?)
+        } else {
+            None
+        };
+
+        // Parse ORDER BY
         self.skip_whitespace();
         let order_by = if self.try_keyword("ORDER") {
             self.skip_whitespace();
@@ -328,12 +402,244 @@ impl<'a> SparqlParser<'a> {
 
         Ok(Query::Select {
             variables,
+            projections,
             distinct,
             where_clause,
+            group_by,
+            having,
             order_by,
             limit,
             offset,
         })
+    }
+
+    /// Parse projections: variables and/or aggregate expressions
+    fn parse_projections(&mut self) -> Result<(Vec<String>, Vec<Projection>), String> {
+        let mut variables = Vec::new();
+        let mut projections = Vec::new();
+
+        loop {
+            self.skip_whitespace();
+
+            // Check for aggregate expression: (COUNT(...) AS ?var)
+            if self.current_char() == '(' {
+                let projection = self.parse_aggregate_projection()?;
+                if let Projection::Aggregate { alias, .. } = &projection {
+                    if let Some(a) = alias {
+                        variables.push(a.clone());
+                    }
+                }
+                projections.push(projection);
+            } else if self.current_char() == '?' || self.current_char() == '$' {
+                // Simple variable
+                self.pos += 1;
+                let start = self.pos;
+                while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                    self.pos += 1;
+                }
+                let var = self.input[start..self.pos].to_string();
+                variables.push(var.clone());
+                projections.push(Projection::Variable(var));
+            } else {
+                break;
+            }
+        }
+
+        if projections.is_empty() {
+            return Err("Expected at least one variable or aggregate".to_string());
+        }
+
+        Ok((variables, projections))
+    }
+
+    /// Parse an aggregate projection: (COUNT(?x) AS ?count)
+    fn parse_aggregate_projection(&mut self) -> Result<Projection, String> {
+        if self.current_char() != '(' {
+            return Err("Expected '(' for aggregate".to_string());
+        }
+        self.pos += 1;
+        self.skip_whitespace();
+
+        // Parse aggregate function
+        let agg_distinct = if self.try_keyword("COUNT") {
+            self.parse_aggregate_function("COUNT")?
+        } else if self.try_keyword("SUM") {
+            self.parse_aggregate_function("SUM")?
+        } else if self.try_keyword("AVG") {
+            self.parse_aggregate_function("AVG")?
+        } else if self.try_keyword("MIN") {
+            self.parse_aggregate_function("MIN")?
+        } else if self.try_keyword("MAX") {
+            self.parse_aggregate_function("MAX")?
+        } else if self.try_keyword("SAMPLE") {
+            self.parse_aggregate_function("SAMPLE")?
+        } else if self.try_keyword("GROUP_CONCAT") {
+            self.parse_group_concat_function()?
+        } else {
+            return Err("Expected aggregate function (COUNT, SUM, AVG, MIN, MAX, SAMPLE, GROUP_CONCAT)".to_string());
+        };
+
+        let (function, variable, distinct) = agg_distinct;
+
+        // Parse AS ?alias
+        self.skip_whitespace();
+        let alias = if self.try_keyword("AS") {
+            self.skip_whitespace();
+            if self.current_char() != '?' && self.current_char() != '$' {
+                return Err("Expected variable after AS".to_string());
+            }
+            self.pos += 1;
+            let start = self.pos;
+            while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                self.pos += 1;
+            }
+            Some(self.input[start..self.pos].to_string())
+        } else {
+            None
+        };
+
+        self.skip_whitespace();
+        if self.current_char() != ')' {
+            return Err("Expected ')' after aggregate".to_string());
+        }
+        self.pos += 1;
+
+        Ok(Projection::Aggregate {
+            function,
+            variable,
+            alias,
+            distinct,
+        })
+    }
+
+    /// Parse aggregate function arguments: (DISTINCT? ?var | *)
+    fn parse_aggregate_function(&mut self, name: &str) -> Result<(AggregateFunction, Option<String>, bool), String> {
+        self.skip_whitespace();
+        if self.current_char() != '(' {
+            return Err(format!("Expected '(' after {}", name));
+        }
+        self.pos += 1;
+        self.skip_whitespace();
+
+        let distinct = self.try_keyword("DISTINCT");
+        self.skip_whitespace();
+
+        let variable = if self.current_char() == '*' {
+            self.pos += 1;
+            None // COUNT(*) case
+        } else if self.current_char() == '?' || self.current_char() == '$' {
+            self.pos += 1;
+            let start = self.pos;
+            while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                self.pos += 1;
+            }
+            Some(self.input[start..self.pos].to_string())
+        } else {
+            return Err("Expected variable or * in aggregate".to_string());
+        };
+
+        self.skip_whitespace();
+        if self.current_char() != ')' {
+            return Err("Expected ')' after aggregate variable".to_string());
+        }
+        self.pos += 1;
+
+        let function = match name {
+            "COUNT" => AggregateFunction::Count,
+            "SUM" => AggregateFunction::Sum,
+            "AVG" => AggregateFunction::Avg,
+            "MIN" => AggregateFunction::Min,
+            "MAX" => AggregateFunction::Max,
+            "SAMPLE" => AggregateFunction::Sample,
+            _ => return Err(format!("Unknown aggregate function: {}", name)),
+        };
+
+        Ok((function, variable, distinct))
+    }
+
+    /// Parse GROUP_CONCAT function
+    fn parse_group_concat_function(&mut self) -> Result<(AggregateFunction, Option<String>, bool), String> {
+        self.skip_whitespace();
+        if self.current_char() != '(' {
+            return Err("Expected '(' after GROUP_CONCAT".to_string());
+        }
+        self.pos += 1;
+        self.skip_whitespace();
+
+        let distinct = self.try_keyword("DISTINCT");
+        self.skip_whitespace();
+
+        let variable = if self.current_char() == '?' || self.current_char() == '$' {
+            self.pos += 1;
+            let start = self.pos;
+            while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                self.pos += 1;
+            }
+            Some(self.input[start..self.pos].to_string())
+        } else {
+            return Err("Expected variable in GROUP_CONCAT".to_string());
+        };
+
+        // Parse optional SEPARATOR
+        self.skip_whitespace();
+        let separator = if self.current_char() == ';' {
+            self.pos += 1;
+            self.skip_whitespace();
+            if !self.try_keyword("SEPARATOR") {
+                return Err("Expected SEPARATOR".to_string());
+            }
+            self.skip_whitespace();
+            if self.current_char() != '=' {
+                return Err("Expected '=' after SEPARATOR".to_string());
+            }
+            self.pos += 1;
+            self.skip_whitespace();
+            if self.current_char() == '"' || self.current_char() == '\'' {
+                let sep = self.parse_literal()?;
+                if let Term::Literal(lit) = sep {
+                    Some(lit.value().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        self.skip_whitespace();
+        if self.current_char() != ')' {
+            return Err("Expected ')' after GROUP_CONCAT".to_string());
+        }
+        self.pos += 1;
+
+        Ok((AggregateFunction::GroupConcat { separator }, variable, distinct))
+    }
+
+    /// Parse GROUP BY variable list
+    fn parse_group_by_list(&mut self) -> Result<Vec<String>, String> {
+        let mut vars = Vec::new();
+
+        loop {
+            self.skip_whitespace();
+            if self.current_char() == '?' || self.current_char() == '$' {
+                self.pos += 1;
+                let start = self.pos;
+                while self.pos < self.input.len() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+                    self.pos += 1;
+                }
+                vars.push(self.input[start..self.pos].to_string());
+            } else {
+                break;
+            }
+        }
+
+        if vars.is_empty() {
+            return Err("Expected at least one variable after GROUP BY".to_string());
+        }
+
+        Ok(vars)
     }
 
     fn parse_ask(&mut self) -> Result<Query, String> {
@@ -544,10 +850,33 @@ impl<'a> SparqlParser<'a> {
             };
             let _ = silent; // Suppress unused warning
 
-            // Check for nested group
+            // Check for nested group or subquery
             if self.current_char() == '{' {
-                let nested = self.parse_where_clause()?;
-                patterns.push(GraphPattern::Group(Box::new(nested)));
+                // Look ahead to check for SELECT (subquery)
+                let saved_pos = self.pos;
+                self.pos += 1; // consume '{'
+                self.skip_whitespace();
+
+                if self.try_keyword("SELECT") {
+                    // It's a subquery - reset and parse as a full SELECT
+                    self.pos = saved_pos + 1; // after '{'
+                    self.skip_whitespace();
+                    // We already consumed SELECT above, re-parse it
+                    self.pos = saved_pos + 1;
+                    self.skip_whitespace();
+                    self.try_keyword("SELECT"); // consume again
+                    let subquery = self.parse_select()?;
+                    self.skip_whitespace();
+                    if self.current_char() == '}' {
+                        self.pos += 1;
+                    }
+                    patterns.push(GraphPattern::Subquery(Box::new(subquery)));
+                } else {
+                    // Regular nested group
+                    self.pos = saved_pos; // reset to '{'
+                    let nested = self.parse_where_clause()?;
+                    patterns.push(GraphPattern::Group(Box::new(nested)));
+                }
                 continue;
             }
 
@@ -598,17 +927,188 @@ impl<'a> SparqlParser<'a> {
         let subject = self.parse_term_pattern()?;
 
         self.skip_whitespace();
-        let predicate = if self.current_char() == 'a' && !self.peek_char(1).is_alphanumeric() {
-            self.pos += 1;
-            TermPattern::Term(Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"))
-        } else {
-            self.parse_term_pattern()?
-        };
+        // Check for property path or simple predicate
+        let predicate = self.parse_predicate_or_path()?;
 
         self.skip_whitespace();
         let object = self.parse_term_pattern()?;
 
         Ok(TriplePattern { subject, predicate, object })
+    }
+
+    /// Parse a predicate which may be a simple term or a property path
+    fn parse_predicate_or_path(&mut self) -> Result<TermPattern, String> {
+        self.skip_whitespace();
+
+        // Check for 'a' keyword (rdf:type)
+        if self.current_char() == 'a' && !self.peek_char(1).is_alphanumeric() {
+            self.pos += 1;
+            return Ok(TermPattern::Term(Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")));
+        }
+
+        // Check for variable
+        if self.current_char() == '?' || self.current_char() == '$' {
+            return self.parse_term_pattern();
+        }
+
+        // Try to parse as property path
+        let path = self.parse_property_path()?;
+
+        // If it's just a simple predicate, return as Term
+        if let PropertyPath::Predicate(term) = &path {
+            Ok(TermPattern::Term(term.clone()))
+        } else {
+            Ok(TermPattern::Path(path))
+        }
+    }
+
+    /// Parse a property path expression
+    fn parse_property_path(&mut self) -> Result<PropertyPath, String> {
+        self.parse_path_alternative()
+    }
+
+    /// Parse alternative paths (path1 | path2)
+    fn parse_path_alternative(&mut self) -> Result<PropertyPath, String> {
+        let mut left = self.parse_path_sequence()?;
+
+        loop {
+            self.skip_whitespace();
+            if self.current_char() == '|' {
+                self.pos += 1;
+                self.skip_whitespace();
+                let right = self.parse_path_sequence()?;
+                left = PropertyPath::Alternative(Box::new(left), Box::new(right));
+            } else {
+                break;
+            }
+        }
+
+        Ok(left)
+    }
+
+    /// Parse sequence paths (path1 / path2)
+    fn parse_path_sequence(&mut self) -> Result<PropertyPath, String> {
+        let mut left = self.parse_path_element()?;
+
+        loop {
+            self.skip_whitespace();
+            if self.current_char() == '/' {
+                self.pos += 1;
+                self.skip_whitespace();
+                let right = self.parse_path_element()?;
+                left = PropertyPath::Sequence(Box::new(left), Box::new(right));
+            } else {
+                break;
+            }
+        }
+
+        Ok(left)
+    }
+
+    /// Parse a path element with optional modifiers (*, +, ?)
+    fn parse_path_element(&mut self) -> Result<PropertyPath, String> {
+        self.skip_whitespace();
+
+        let mut path = self.parse_path_primary()?;
+
+        // Check for modifiers
+        self.skip_whitespace();
+        match self.current_char() {
+            '*' => {
+                self.pos += 1;
+                path = PropertyPath::ZeroOrMore(Box::new(path));
+            }
+            '+' => {
+                self.pos += 1;
+                path = PropertyPath::OneOrMore(Box::new(path));
+            }
+            '?' => {
+                // Be careful not to consume ? if it's a variable
+                let next = self.peek_char(1);
+                if !next.is_alphanumeric() && next != '_' {
+                    self.pos += 1;
+                    path = PropertyPath::ZeroOrOne(Box::new(path));
+                }
+            }
+            _ => {}
+        }
+
+        Ok(path)
+    }
+
+    /// Parse primary path element (IRI, ^path, (path), !set)
+    fn parse_path_primary(&mut self) -> Result<PropertyPath, String> {
+        self.skip_whitespace();
+
+        match self.current_char() {
+            '^' => {
+                // Inverse path
+                self.pos += 1;
+                let inner = self.parse_path_primary()?;
+                Ok(PropertyPath::Inverse(Box::new(inner)))
+            }
+            '(' => {
+                // Grouped path
+                self.pos += 1;
+                let inner = self.parse_property_path()?;
+                self.skip_whitespace();
+                if self.current_char() != ')' {
+                    return Err("Expected ')' in property path".to_string());
+                }
+                self.pos += 1;
+                Ok(inner)
+            }
+            '!' => {
+                // Negated property set
+                self.pos += 1;
+                self.skip_whitespace();
+                if self.current_char() == '(' {
+                    self.pos += 1;
+                    let mut negated = Vec::new();
+                    loop {
+                        self.skip_whitespace();
+                        if self.current_char() == ')' {
+                            self.pos += 1;
+                            break;
+                        }
+                        let term = self.parse_path_iri()?;
+                        negated.push(term);
+                        self.skip_whitespace();
+                        if self.current_char() == '|' {
+                            self.pos += 1;
+                        }
+                    }
+                    Ok(PropertyPath::NegatedSet(negated))
+                } else {
+                    // Single negated IRI
+                    let term = self.parse_path_iri()?;
+                    Ok(PropertyPath::NegatedSet(vec![term]))
+                }
+            }
+            _ => {
+                // Simple IRI
+                let term = self.parse_path_iri()?;
+                Ok(PropertyPath::Predicate(term))
+            }
+        }
+    }
+
+    /// Parse an IRI for property path
+    fn parse_path_iri(&mut self) -> Result<Term, String> {
+        self.skip_whitespace();
+
+        if self.current_char() == '<' {
+            let iri = self.parse_iri()?;
+            Ok(Term::uri(&iri))
+        } else if self.current_char().is_alphabetic() {
+            let iri = self.parse_prefixed_name()?;
+            Ok(Term::uri(&iri))
+        } else if self.current_char() == 'a' && !self.peek_char(1).is_alphanumeric() {
+            self.pos += 1;
+            Ok(Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"))
+        } else {
+            Err(format!("Expected IRI in property path, found: {}", self.current_char()))
+        }
     }
 
     fn parse_term_pattern(&mut self) -> Result<TermPattern, String> {
@@ -1099,8 +1599,13 @@ impl<'a> SparqlEngine<'a> {
     /// Execute a SPARQL query
     pub fn execute(&self, query: &Query) -> QueryResult {
         match query {
-            Query::Select { variables, distinct, where_clause, order_by, limit, offset } => {
+            Query::Select { variables, projections, distinct, where_clause, group_by, having, order_by, limit, offset } => {
                 let mut solutions = self.evaluate_where(where_clause);
+
+                // Apply GROUP BY and aggregates
+                if group_by.is_some() || projections.iter().any(|p| matches!(p, Projection::Aggregate { .. })) {
+                    solutions = self.apply_grouping_and_aggregates(&solutions, group_by.as_ref(), projections, having.as_ref());
+                }
 
                 // Apply ORDER BY
                 if let Some(order) = order_by {
@@ -1196,6 +1701,13 @@ impl<'a> SparqlEngine<'a> {
     fn evaluate_pattern(&self, pattern: &GraphPattern, mut solutions: Vec<HashMap<String, Term>>) -> Vec<HashMap<String, Term>> {
         match pattern {
             GraphPattern::Triple(tp) => {
+                // Check if predicate is a property path
+                if let TermPattern::Path(path) = &tp.predicate {
+                    // Handle property path evaluation
+                    return self.evaluate_property_path(path, &tp.subject, &tp.object, solutions);
+                }
+
+                // Standard triple pattern matching
                 let mut new_solutions = Vec::new();
 
                 for solution in solutions {
@@ -1247,7 +1759,56 @@ impl<'a> SparqlEngine<'a> {
                 // Execute federated query against remote SPARQL endpoint
                 self.evaluate_service(endpoint, service_clause, solutions, *silent)
             }
+            GraphPattern::Subquery(subquery) => {
+                // Execute the nested subquery and join with current solutions
+                self.evaluate_subquery(subquery, solutions)
+            }
         }
+    }
+
+    /// Evaluate a nested subquery
+    fn evaluate_subquery(
+        &self,
+        subquery: &Query,
+        solutions: Vec<HashMap<String, Term>>,
+    ) -> Vec<HashMap<String, Term>> {
+        // Execute the subquery
+        let subquery_result = self.execute(subquery);
+
+        // Extract bindings from the result
+        let subquery_bindings = match subquery_result {
+            QueryResult::Bindings { solutions: sub_sols, .. } => sub_sols,
+            QueryResult::Boolean(true) => vec![HashMap::new()],
+            QueryResult::Boolean(false) => vec![],
+            QueryResult::Graph(_) => vec![], // CONSTRUCT subqueries not typical
+        };
+
+        // Join current solutions with subquery results
+        let mut result = Vec::new();
+        for solution in solutions {
+            for sub_sol in &subquery_bindings {
+                // Check for compatible bindings (no conflicts)
+                let mut compatible = true;
+                let mut merged = solution.clone();
+
+                for (var, val) in sub_sol {
+                    if let Some(existing) = merged.get(var) {
+                        if existing != val {
+                            compatible = false;
+                            break;
+                        }
+                    } else {
+                        merged.insert(var.clone(), val.clone());
+                    }
+                }
+
+                if compatible {
+                    result.push(merged);
+                }
+            }
+        }
+
+        result
     }
 
     /// Execute a SERVICE query against a remote SPARQL endpoint
@@ -1319,6 +1880,14 @@ impl<'a> SparqlEngine<'a> {
                     vars.insert(var.clone());
                 }
                 GraphPattern::Filter(_) | GraphPattern::Service(_, _, _) => {}
+                GraphPattern::Subquery(subquery) => {
+                    // Collect variables from subquery projections
+                    if let Query::Select { variables, .. } = subquery.as_ref() {
+                        for var in variables {
+                            vars.insert(var.clone());
+                        }
+                    }
+                }
             }
         }
 
@@ -1381,6 +1950,28 @@ impl<'a> SparqlEngine<'a> {
                 }
             }
             TermPattern::Term(t) => self.term_to_sparql(t),
+            TermPattern::Path(path) => self.property_path_to_sparql(path),
+        }
+    }
+
+    /// Convert a property path to SPARQL string
+    fn property_path_to_sparql(&self, path: &PropertyPath) -> String {
+        match path {
+            PropertyPath::Predicate(term) => self.term_to_sparql(term),
+            PropertyPath::Inverse(inner) => format!("^{}", self.property_path_to_sparql(inner)),
+            PropertyPath::Sequence(left, right) => {
+                format!("{}/{}", self.property_path_to_sparql(left), self.property_path_to_sparql(right))
+            }
+            PropertyPath::Alternative(left, right) => {
+                format!("({}|{})", self.property_path_to_sparql(left), self.property_path_to_sparql(right))
+            }
+            PropertyPath::ZeroOrMore(inner) => format!("{}*", self.property_path_to_sparql(inner)),
+            PropertyPath::OneOrMore(inner) => format!("{}+", self.property_path_to_sparql(inner)),
+            PropertyPath::ZeroOrOne(inner) => format!("{}?", self.property_path_to_sparql(inner)),
+            PropertyPath::NegatedSet(terms) => {
+                let negated: Vec<String> = terms.iter().map(|t| self.term_to_sparql(t)).collect();
+                format!("!({})", negated.join("|"))
+            }
         }
     }
 
@@ -1650,6 +2241,494 @@ impl<'a> SparqlEngine<'a> {
                 }
             }
             TermPattern::Term(t) => t == term,
+            TermPattern::Path(path) => {
+                // For property paths in predicate position, we need special handling
+                // This is called when we're just matching a predicate, not traversing a path
+                match path {
+                    PropertyPath::Predicate(p) => p == term,
+                    _ => false, // Complex paths handled elsewhere
+                }
+            }
+        }
+    }
+
+    /// Evaluate a property path pattern
+    fn evaluate_property_path(
+        &self,
+        path: &PropertyPath,
+        subject: &TermPattern,
+        object: &TermPattern,
+        solutions: Vec<HashMap<String, Term>>,
+    ) -> Vec<HashMap<String, Term>> {
+        let mut new_solutions = Vec::new();
+
+        for solution in solutions {
+            // Get bound subject if variable is already bound
+            let subj_bound = match subject {
+                TermPattern::Variable(v) => solution.get(v).cloned(),
+                TermPattern::Term(t) => Some(t.clone()),
+                TermPattern::Path(_) => None, // Paths shouldn't be in subject position
+            };
+
+            // Get bound object if variable is already bound
+            let obj_bound = match object {
+                TermPattern::Variable(v) => solution.get(v).cloned(),
+                TermPattern::Term(t) => Some(t.clone()),
+                TermPattern::Path(_) => None,
+            };
+
+            // Evaluate the path and get all (subject, object) pairs
+            let pairs = self.evaluate_path_pairs(path, subj_bound.as_ref(), obj_bound.as_ref());
+
+            // For each matching pair, create new bindings
+            for (s, o) in pairs {
+                let mut new_bindings = solution.clone();
+                let mut valid = true;
+
+                // Bind subject if it's a variable
+                if let TermPattern::Variable(v) = subject {
+                    if let Some(existing) = new_bindings.get(v) {
+                        if existing != &s {
+                            valid = false;
+                        }
+                    } else {
+                        new_bindings.insert(v.clone(), s.clone());
+                    }
+                }
+
+                // Bind object if it's a variable
+                if let TermPattern::Variable(v) = object {
+                    if let Some(existing) = new_bindings.get(v) {
+                        if existing != &o {
+                            valid = false;
+                        }
+                    } else {
+                        new_bindings.insert(v.clone(), o);
+                    }
+                }
+
+                if valid {
+                    new_solutions.push(new_bindings);
+                }
+            }
+        }
+
+        new_solutions
+    }
+
+    /// Evaluate a property path and return all matching (subject, object) pairs
+    fn evaluate_path_pairs(
+        &self,
+        path: &PropertyPath,
+        subject: Option<&Term>,
+        object: Option<&Term>,
+    ) -> Vec<(Term, Term)> {
+        match path {
+            PropertyPath::Predicate(pred) => {
+                // Simple predicate: find all triples with this predicate
+                let mut pairs = Vec::new();
+                for triple in self.store.iter() {
+                    if &triple.predicate == pred {
+                        // Check subject constraint
+                        if let Some(s) = subject {
+                            if &triple.subject != s {
+                                continue;
+                            }
+                        }
+                        // Check object constraint
+                        if let Some(o) = object {
+                            if &triple.object != o {
+                                continue;
+                            }
+                        }
+                        pairs.push((triple.subject.clone(), triple.object.clone()));
+                    }
+                }
+                pairs
+            }
+
+            PropertyPath::Inverse(inner) => {
+                // Inverse: swap subject and object
+                let inner_pairs = self.evaluate_path_pairs(inner, object, subject);
+                inner_pairs.into_iter().map(|(s, o)| (o, s)).collect()
+            }
+
+            PropertyPath::Sequence(left, right) => {
+                // Sequence: path1/path2 - find intermediate nodes
+                let mut pairs = Vec::new();
+
+                // First, evaluate left path from subject
+                let left_pairs = self.evaluate_path_pairs(left, subject, None);
+
+                // For each left result, evaluate right path
+                for (s, intermediate) in left_pairs {
+                    let right_pairs = self.evaluate_path_pairs(right, Some(&intermediate), object);
+                    for (_, o) in right_pairs {
+                        pairs.push((s.clone(), o));
+                    }
+                }
+
+                pairs
+            }
+
+            PropertyPath::Alternative(left, right) => {
+                // Alternative: path1|path2 - union of both paths
+                let mut pairs = self.evaluate_path_pairs(left, subject, object);
+                let right_pairs = self.evaluate_path_pairs(right, subject, object);
+                pairs.extend(right_pairs);
+
+                // Remove duplicates
+                pairs.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+                pairs.dedup();
+                pairs
+            }
+
+            PropertyPath::ZeroOrMore(inner) => {
+                // Zero or more: path* - reflexive transitive closure
+                let mut pairs = Vec::new();
+                let mut visited = std::collections::HashSet::new();
+
+                // Start with identity (zero steps)
+                if let Some(s) = subject {
+                    if object.is_none() || object == Some(s) {
+                        pairs.push((s.clone(), s.clone()));
+                    }
+                    visited.insert(format!("{:?}", s));
+                    self.transitive_closure(inner, s, object, &mut pairs, &mut visited);
+                } else {
+                    // No subject bound - collect all reachable from all nodes
+                    let all_nodes = self.collect_all_nodes();
+                    for node in &all_nodes {
+                        if object.is_none() || object == Some(node) {
+                            pairs.push((node.clone(), node.clone()));
+                        }
+                        let mut node_visited = std::collections::HashSet::new();
+                        node_visited.insert(format!("{:?}", node));
+                        self.transitive_closure(inner, node, object, &mut pairs, &mut node_visited);
+                    }
+                }
+
+                pairs
+            }
+
+            PropertyPath::OneOrMore(inner) => {
+                // One or more: path+ - transitive closure (at least one step)
+                let mut pairs = Vec::new();
+                let mut visited = std::collections::HashSet::new();
+
+                if let Some(s) = subject {
+                    visited.insert(format!("{:?}", s));
+                    self.transitive_closure(inner, s, object, &mut pairs, &mut visited);
+                } else {
+                    // No subject bound - start from all nodes
+                    let all_nodes = self.collect_all_nodes();
+                    for node in &all_nodes {
+                        let mut node_visited = std::collections::HashSet::new();
+                        node_visited.insert(format!("{:?}", node));
+                        self.transitive_closure(inner, &node, object, &mut pairs, &mut node_visited);
+                    }
+                }
+
+                pairs
+            }
+
+            PropertyPath::ZeroOrOne(inner) => {
+                // Zero or one: path? - optional single step
+                let mut pairs = Vec::new();
+
+                // Zero steps (identity)
+                if let Some(s) = subject {
+                    if object.is_none() || object == Some(s) {
+                        pairs.push((s.clone(), s.clone()));
+                    }
+                }
+
+                // One step
+                let one_pairs = self.evaluate_path_pairs(inner, subject, object);
+                pairs.extend(one_pairs);
+
+                // Remove duplicates
+                pairs.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+                pairs.dedup();
+                pairs
+            }
+
+            PropertyPath::NegatedSet(negated) => {
+                // Negated property set: !(p1|p2|...) - any predicate NOT in the set
+                let mut pairs = Vec::new();
+
+                for triple in self.store.iter() {
+                    // Check if predicate is in the negated set
+                    let is_negated = negated.iter().any(|p| &triple.predicate == p);
+                    if is_negated {
+                        continue;
+                    }
+
+                    // Check subject constraint
+                    if let Some(s) = subject {
+                        if &triple.subject != s {
+                            continue;
+                        }
+                    }
+                    // Check object constraint
+                    if let Some(o) = object {
+                        if &triple.object != o {
+                            continue;
+                        }
+                    }
+                    pairs.push((triple.subject.clone(), triple.object.clone()));
+                }
+
+                pairs
+            }
+        }
+    }
+
+    /// Helper for transitive closure computation
+    fn transitive_closure(
+        &self,
+        path: &PropertyPath,
+        start: &Term,
+        target: Option<&Term>,
+        pairs: &mut Vec<(Term, Term)>,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        // Get direct successors via the path
+        let successors = self.evaluate_path_pairs(path, Some(start), None);
+
+        for (_, next) in successors {
+            let key = format!("{:?}", next);
+
+            // Add pair if it matches target constraint
+            if target.is_none() || target == Some(&next) {
+                pairs.push((start.clone(), next.clone()));
+            }
+
+            // Continue traversal if not visited
+            if !visited.contains(&key) {
+                visited.insert(key);
+                self.transitive_closure(path, &next, target, pairs, visited);
+            }
+        }
+    }
+
+    /// Collect all nodes (subjects and objects) in the store
+    fn collect_all_nodes(&self) -> Vec<Term> {
+        let mut nodes = std::collections::HashSet::new();
+        for triple in self.store.iter() {
+            nodes.insert(format!("{:?}", triple.subject));
+            nodes.insert(format!("{:?}", triple.object));
+        }
+
+        // Re-collect actual terms
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for triple in self.store.iter() {
+            let s_key = format!("{:?}", triple.subject);
+            if !seen.contains(&s_key) {
+                seen.insert(s_key);
+                result.push(triple.subject.clone());
+            }
+            let o_key = format!("{:?}", triple.object);
+            if !seen.contains(&o_key) {
+                seen.insert(o_key);
+                result.push(triple.object.clone());
+            }
+        }
+        result
+    }
+
+    /// Apply grouping and aggregate functions
+    fn apply_grouping_and_aggregates(
+        &self,
+        solutions: &[HashMap<String, Term>],
+        group_by: Option<&Vec<String>>,
+        projections: &[Projection],
+        having: Option<&FilterExpr>,
+    ) -> Vec<HashMap<String, Term>> {
+        // Group solutions by the GROUP BY variables
+        let mut groups: HashMap<String, Vec<&HashMap<String, Term>>> = HashMap::new();
+
+        for solution in solutions {
+            let group_key = if let Some(vars) = group_by {
+                vars.iter()
+                    .map(|v| solution.get(v).map(|t| format!("{:?}", t)).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            } else {
+                // No GROUP BY - all solutions in one group
+                "".to_string()
+            };
+            groups.entry(group_key).or_default().push(solution);
+        }
+
+        // Process each group
+        let mut result = Vec::new();
+        for (_, group_solutions) in groups {
+            let mut row: HashMap<String, Term> = HashMap::new();
+
+            // Add GROUP BY variables to result (take from first solution)
+            if let Some(vars) = group_by {
+                if let Some(first) = group_solutions.first() {
+                    for var in vars {
+                        if let Some(val) = first.get(var) {
+                            row.insert(var.clone(), val.clone());
+                        }
+                    }
+                }
+            }
+
+            // Compute aggregates
+            for projection in projections {
+                if let Projection::Aggregate { function, variable, alias, distinct } = projection {
+                    let agg_result = self.compute_aggregate(function, variable.as_deref(), &group_solutions, *distinct);
+                    let var_name = alias.clone().unwrap_or_else(|| {
+                        // Generate a default name
+                        format!("agg_{}", variable.as_deref().unwrap_or("*"))
+                    });
+                    row.insert(var_name, agg_result);
+                }
+            }
+
+            // Apply HAVING filter
+            if let Some(having_expr) = having {
+                if !self.evaluate_filter(having_expr, &row) {
+                    continue;
+                }
+            }
+
+            result.push(row);
+        }
+
+        result
+    }
+
+    /// Compute an aggregate function over a group of solutions
+    fn compute_aggregate(
+        &self,
+        function: &AggregateFunction,
+        variable: Option<&str>,
+        solutions: &[&HashMap<String, Term>],
+        distinct: bool,
+    ) -> Term {
+        // Collect values for the variable
+        let values: Vec<&Term> = if let Some(var) = variable {
+            solutions.iter()
+                .filter_map(|s| s.get(var))
+                .collect()
+        } else {
+            // COUNT(*) - count all solutions
+            vec![]
+        };
+
+        // Apply DISTINCT if needed
+        let values: Vec<&Term> = if distinct {
+            let mut seen = std::collections::HashSet::new();
+            values.into_iter()
+                .filter(|v| seen.insert(format!("{:?}", v)))
+                .collect()
+        } else {
+            values
+        };
+
+        match function {
+            AggregateFunction::Count => {
+                let count = if variable.is_some() {
+                    values.len()
+                } else {
+                    solutions.len() // COUNT(*)
+                };
+                Term::typed_literal(count.to_string(), "http://www.w3.org/2001/XMLSchema#integer")
+            }
+
+            AggregateFunction::Sum => {
+                let sum: f64 = values.iter()
+                    .filter_map(|v| {
+                        if let Term::Literal(lit) = v {
+                            lit.value().parse::<f64>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .sum();
+                Term::typed_literal(sum.to_string(), "http://www.w3.org/2001/XMLSchema#decimal")
+            }
+
+            AggregateFunction::Avg => {
+                let nums: Vec<f64> = values.iter()
+                    .filter_map(|v| {
+                        if let Term::Literal(lit) = v {
+                            lit.value().parse::<f64>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let avg = if nums.is_empty() {
+                    0.0
+                } else {
+                    nums.iter().sum::<f64>() / nums.len() as f64
+                };
+                Term::typed_literal(avg.to_string(), "http://www.w3.org/2001/XMLSchema#decimal")
+            }
+
+            AggregateFunction::Min => {
+                let min = values.iter()
+                    .filter_map(|v| {
+                        if let Term::Literal(lit) = v {
+                            lit.value().parse::<f64>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(f64::INFINITY, |a, b| a.min(b));
+                if min.is_infinite() {
+                    Term::literal("".to_string())
+                } else {
+                    Term::typed_literal(min.to_string(), "http://www.w3.org/2001/XMLSchema#decimal")
+                }
+            }
+
+            AggregateFunction::Max => {
+                let max = values.iter()
+                    .filter_map(|v| {
+                        if let Term::Literal(lit) = v {
+                            lit.value().parse::<f64>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(f64::NEG_INFINITY, |a, b| a.max(b));
+                if max.is_infinite() {
+                    Term::literal("".to_string())
+                } else {
+                    Term::typed_literal(max.to_string(), "http://www.w3.org/2001/XMLSchema#decimal")
+                }
+            }
+
+            AggregateFunction::Sample => {
+                // Return the first value
+                if let Some(first) = values.first() {
+                    (*first).clone()
+                } else {
+                    Term::literal("".to_string())
+                }
+            }
+
+            AggregateFunction::GroupConcat { separator } => {
+                let sep = separator.as_deref().unwrap_or(" ");
+                let concat: String = values.iter()
+                    .map(|v| {
+                        if let Term::Literal(lit) = v {
+                            lit.value().to_string()
+                        } else {
+                            format!("{:?}", v)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(sep);
+                Term::literal(concat)
+            }
         }
     }
 
@@ -1842,6 +2921,13 @@ impl<'a> SparqlEngine<'a> {
         match pattern {
             TermPattern::Variable(var) => bindings.get(var).cloned(),
             TermPattern::Term(t) => Some(t.clone()),
+            TermPattern::Path(path) => {
+                // For property paths in CONSTRUCT, use the first predicate if simple
+                match path {
+                    PropertyPath::Predicate(p) => Some(p.clone()),
+                    _ => None, // Complex paths can't be directly instantiated
+                }
+            }
         }
     }
 }
@@ -2070,6 +3156,457 @@ mod tests {
 
         if let QueryResult::Boolean(value) = result.unwrap() {
             assert!(value);
+        }
+    }
+
+    #[test]
+    fn test_parse_property_path_sequence() {
+        let query = "PREFIX ex: <http://example.org/> SELECT ?x WHERE { ?s ex:a/ex:b ?x }";
+        let mut parser = SparqlParser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_property_path_alternative() {
+        let query = "PREFIX ex: <http://example.org/> SELECT ?x WHERE { ?s ex:a|ex:b ?x }";
+        let mut parser = SparqlParser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_property_path_inverse() {
+        let query = "PREFIX ex: <http://example.org/> SELECT ?x WHERE { ?s ^ex:parent ?x }";
+        let mut parser = SparqlParser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_property_path_transitive() {
+        let query = "PREFIX ex: <http://example.org/> SELECT ?x WHERE { ?s ex:parent+ ?x }";
+        let mut parser = SparqlParser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_property_path_sequence() {
+        let mut store = Store::new();
+        // alice knows bob, bob knows carol
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            Term::uri("http://example.org/knows"),
+            Term::uri("http://example.org/bob"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/bob"),
+            Term::uri("http://example.org/knows"),
+            Term::uri("http://example.org/carol"),
+        ));
+
+        let result = execute_sparql(
+            &store,
+            "SELECT ?x WHERE { <http://example.org/alice> <http://example.org/knows>/<http://example.org/knows> ?x }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 1);
+            let carol = solutions[0].get("x").unwrap();
+            assert_eq!(carol, &Term::uri("http://example.org/carol"));
+        }
+    }
+
+    #[test]
+    fn test_execute_property_path_transitive() {
+        let mut store = Store::new();
+        // a -> b -> c -> d (chain via parent)
+        store.add(Triple::new(
+            Term::uri("http://example.org/a"),
+            Term::uri("http://example.org/parent"),
+            Term::uri("http://example.org/b"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/b"),
+            Term::uri("http://example.org/parent"),
+            Term::uri("http://example.org/c"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/c"),
+            Term::uri("http://example.org/parent"),
+            Term::uri("http://example.org/d"),
+        ));
+
+        // Find all ancestors of 'a' using transitive path
+        let result = execute_sparql(
+            &store,
+            "SELECT ?x WHERE { <http://example.org/a> <http://example.org/parent>+ ?x }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            // Should find b, c, and d
+            assert_eq!(solutions.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_execute_property_path_inverse() {
+        let mut store = Store::new();
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            Term::uri("http://example.org/parent"),
+            Term::uri("http://example.org/bob"),
+        ));
+
+        // Find child of bob using inverse path
+        let result = execute_sparql(
+            &store,
+            "SELECT ?x WHERE { <http://example.org/bob> ^<http://example.org/parent> ?x }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 1);
+            let alice = solutions[0].get("x").unwrap();
+            assert_eq!(alice, &Term::uri("http://example.org/alice"));
+        }
+    }
+
+    #[test]
+    fn test_execute_property_path_alternative() {
+        let mut store = Store::new();
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            Term::uri("http://example.org/knows"),
+            Term::uri("http://example.org/bob"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            Term::uri("http://example.org/likes"),
+            Term::uri("http://example.org/carol"),
+        ));
+
+        // Find people alice knows OR likes
+        let result = execute_sparql(
+            &store,
+            "SELECT ?x WHERE { <http://example.org/alice> <http://example.org/knows>|<http://example.org/likes> ?x }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_parse_count_aggregate() {
+        let query = "SELECT (COUNT(?x) AS ?count) WHERE { ?s ?p ?x }";
+        let mut parser = SparqlParser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_group_by() {
+        let query = "SELECT ?type (COUNT(?x) AS ?count) WHERE { ?x a ?type } GROUP BY ?type";
+        let mut parser = SparqlParser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_count() {
+        let mut store = Store::new();
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            Term::uri("http://example.org/knows"),
+            Term::uri("http://example.org/bob"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            Term::uri("http://example.org/knows"),
+            Term::uri("http://example.org/carol"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/bob"),
+            Term::uri("http://example.org/knows"),
+            Term::uri("http://example.org/dave"),
+        ));
+
+        let result = execute_sparql(
+            &store,
+            "SELECT (COUNT(*) AS ?count) WHERE { ?s <http://example.org/knows> ?o }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 1);
+            let count = solutions[0].get("count").unwrap();
+            if let Term::Literal(lit) = count {
+                assert_eq!(lit.value(), "3");
+            }
+        }
+    }
+
+    #[test]
+    fn test_execute_group_by_count() {
+        let mut store = Store::new();
+        let rdf_type = Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+
+        // Add people
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            rdf_type.clone(),
+            Term::uri("http://example.org/Person"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/bob"),
+            rdf_type.clone(),
+            Term::uri("http://example.org/Person"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/fido"),
+            rdf_type.clone(),
+            Term::uri("http://example.org/Dog"),
+        ));
+
+        let result = execute_sparql(
+            &store,
+            "SELECT ?type (COUNT(?x) AS ?count) WHERE { ?x a ?type } GROUP BY ?type"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 2); // Person and Dog groups
+        }
+    }
+
+    #[test]
+    fn test_execute_sum() {
+        let mut store = Store::new();
+        store.add(Triple::new(
+            Term::uri("http://example.org/a"),
+            Term::uri("http://example.org/value"),
+            Term::typed_literal("10", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/b"),
+            Term::uri("http://example.org/value"),
+            Term::typed_literal("20", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/c"),
+            Term::uri("http://example.org/value"),
+            Term::typed_literal("30", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+
+        let result = execute_sparql(
+            &store,
+            "SELECT (SUM(?v) AS ?total) WHERE { ?s <http://example.org/value> ?v }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 1);
+            let total = solutions[0].get("total").unwrap();
+            if let Term::Literal(lit) = total {
+                assert_eq!(lit.value(), "60");
+            }
+        }
+    }
+
+    #[test]
+    fn test_execute_avg() {
+        let mut store = Store::new();
+        store.add(Triple::new(
+            Term::uri("http://example.org/a"),
+            Term::uri("http://example.org/score"),
+            Term::typed_literal("10", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/b"),
+            Term::uri("http://example.org/score"),
+            Term::typed_literal("20", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+
+        let result = execute_sparql(
+            &store,
+            "SELECT (AVG(?v) AS ?average) WHERE { ?s <http://example.org/score> ?v }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 1);
+            let avg = solutions[0].get("average").unwrap();
+            if let Term::Literal(lit) = avg {
+                assert_eq!(lit.value(), "15");
+            }
+        }
+    }
+
+    #[test]
+    fn test_execute_min_max() {
+        let mut store = Store::new();
+        store.add(Triple::new(
+            Term::uri("http://example.org/a"),
+            Term::uri("http://example.org/val"),
+            Term::typed_literal("5", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/b"),
+            Term::uri("http://example.org/val"),
+            Term::typed_literal("15", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/c"),
+            Term::uri("http://example.org/val"),
+            Term::typed_literal("10", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+
+        let result = execute_sparql(
+            &store,
+            "SELECT (MIN(?v) AS ?minimum) (MAX(?v) AS ?maximum) WHERE { ?s <http://example.org/val> ?v }"
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            assert_eq!(solutions.len(), 1);
+            let min = solutions[0].get("minimum").unwrap();
+            let max = solutions[0].get("maximum").unwrap();
+            if let (Term::Literal(min_lit), Term::Literal(max_lit)) = (min, max) {
+                assert_eq!(min_lit.value(), "5");
+                assert_eq!(max_lit.value(), "15");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_subquery() {
+        let query = r#"
+            SELECT ?person ?name WHERE {
+                ?person <http://example.org/name> ?name .
+                { SELECT ?person WHERE { ?person a <http://example.org/Person> } }
+            }
+        "#;
+        let mut parser = SparqlParser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_subquery() {
+        let mut store = Store::new();
+        let rdf_type = Term::uri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+
+        // Add people
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            rdf_type.clone(),
+            Term::uri("http://example.org/Person"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/bob"),
+            rdf_type.clone(),
+            Term::uri("http://example.org/Person"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/fido"),
+            rdf_type.clone(),
+            Term::uri("http://example.org/Dog"),
+        ));
+
+        // Add names for all
+        store.add(Triple::new(
+            Term::uri("http://example.org/alice"),
+            Term::uri("http://example.org/name"),
+            Term::literal("Alice".to_string()),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/bob"),
+            Term::uri("http://example.org/name"),
+            Term::literal("Bob".to_string()),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/fido"),
+            Term::uri("http://example.org/name"),
+            Term::literal("Fido".to_string()),
+        ));
+
+        // Use subquery to get only Person entities with names
+        let result = execute_sparql(
+            &store,
+            r#"
+                SELECT ?name WHERE {
+                    ?x <http://example.org/name> ?name .
+                    { SELECT ?x WHERE { ?x a <http://example.org/Person> } }
+                }
+            "#
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            // Should only get Alice and Bob (Persons), not Fido (Dog)
+            assert_eq!(solutions.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_execute_subquery_with_aggregate() {
+        let mut store = Store::new();
+
+        // Add scores for different categories
+        store.add(Triple::new(
+            Term::uri("http://example.org/result1"),
+            Term::uri("http://example.org/category"),
+            Term::uri("http://example.org/A"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/result1"),
+            Term::uri("http://example.org/score"),
+            Term::typed_literal("10", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/result2"),
+            Term::uri("http://example.org/category"),
+            Term::uri("http://example.org/A"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/result2"),
+            Term::uri("http://example.org/score"),
+            Term::typed_literal("20", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/result3"),
+            Term::uri("http://example.org/category"),
+            Term::uri("http://example.org/B"),
+        ));
+        store.add(Triple::new(
+            Term::uri("http://example.org/result3"),
+            Term::uri("http://example.org/score"),
+            Term::typed_literal("30", "http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+
+        // Use subquery with aggregate - find max score per category
+        let result = execute_sparql(
+            &store,
+            r#"
+                SELECT ?cat ?maxScore WHERE {
+                    { SELECT ?cat (MAX(?score) AS ?maxScore) WHERE {
+                        ?r <http://example.org/category> ?cat .
+                        ?r <http://example.org/score> ?score
+                      } GROUP BY ?cat
+                    }
+                }
+            "#
+        );
+        assert!(result.is_ok());
+
+        if let QueryResult::Bindings { solutions, .. } = result.unwrap() {
+            // Should get 2 categories with their max scores
+            assert_eq!(solutions.len(), 2);
         }
     }
 }

@@ -211,6 +211,14 @@ struct Cli {
     #[arg(long)]
     flatten: bool,
 
+    /// Unflatten: reconstruct nested formulas from reified statements
+    #[arg(long)]
+    unflatten: bool,
+
+    /// Enable cryptographic operations (for security, explicit enable)
+    #[arg(long)]
+    crypto: bool,
+
     /// Number of think passes (0 for unlimited)
     #[arg(long = "think-passes", value_name = "N")]
     think_passes: Option<usize>,
@@ -558,6 +566,16 @@ fn main() -> Result<()> {
     // Apply dereification if requested
     if cli.dereify {
         output_store = dereify_store(&output_store);
+    }
+
+    // Apply flatten if requested (extract formulas into main graph)
+    if cli.flatten {
+        output_store = flatten_store(&output_store);
+    }
+
+    // Apply unflatten if requested (reconstruct nested formulas)
+    if cli.unflatten {
+        output_store = unflatten_store(&output_store);
     }
 
     // Execute SPARQL query if specified
@@ -1165,6 +1183,135 @@ fn dereify_store(store: &Store) -> Store {
                 result.add(triple.clone());
             }
         }
+    }
+
+    result
+}
+
+/// Flatten formulas: extract contents of nested formulas into main graph
+/// Each triple inside a formula is added to the main graph with its formula context
+fn flatten_store(store: &Store) -> Store {
+    let mut result = Store::new();
+    let log_implies = "http://www.w3.org/2000/10/swap/log#implies";
+
+    for triple in store.iter() {
+        // Add the triple itself
+        result.add(triple.clone());
+
+        // If subject is a formula, extract its contents
+        if let Term::Formula(f) = &triple.subject {
+            for inner in f.triples() {
+                result.add(inner.clone());
+            }
+        }
+
+        // If object is a formula, extract its contents
+        if let Term::Formula(f) = &triple.object {
+            for inner in f.triples() {
+                result.add(inner.clone());
+            }
+        }
+
+        // Special handling for log:implies - extract antecedent and consequent
+        if let Term::Uri(pred) = &triple.predicate {
+            if pred.as_str() == log_implies {
+                // Antecedent (subject)
+                if let Term::Formula(f) = &triple.subject {
+                    for inner in f.triples() {
+                        result.add(inner.clone());
+                    }
+                }
+                // Consequent (object)
+                if let Term::Formula(f) = &triple.object {
+                    for inner in f.triples() {
+                        result.add(inner.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Unflatten: reconstruct nested formulas from flattened/reified representations
+/// This reverses the flatten operation by grouping related triples back into formulas
+fn unflatten_store(store: &Store) -> Store {
+    let mut result = Store::new();
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let log_formula = "http://www.w3.org/2000/10/swap/log#Formula";
+    let log_includes = "http://www.w3.org/2000/10/swap/log#includes";
+
+    // Find all formula nodes (things typed as log:Formula or used with log:includes)
+    let mut formula_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut formula_contents: HashMap<String, Vec<Triple>> = HashMap::new();
+
+    // First pass: identify formula nodes
+    for triple in store.iter() {
+        // Check for explicit log:Formula type
+        if let (Term::Uri(pred), Term::Uri(obj)) = (&triple.predicate, &triple.object) {
+            if pred.as_str() == rdf_type && obj.as_str() == log_formula {
+                formula_nodes.insert(format!("{:?}", triple.subject));
+            }
+        }
+        // Check for log:includes patterns
+        if let Term::Uri(pred) = &triple.predicate {
+            if pred.as_str() == log_includes {
+                formula_nodes.insert(format!("{:?}", triple.subject));
+            }
+        }
+    }
+
+    // Second pass: collect formula contents
+    for triple in store.iter() {
+        if let Term::Uri(pred) = &triple.predicate {
+            if pred.as_str() == log_includes {
+                let formula_key = format!("{:?}", triple.subject);
+                // The object of log:includes should be a statement to add
+                if let Term::Formula(f) = &triple.object {
+                    formula_contents
+                        .entry(formula_key)
+                        .or_default()
+                        .extend(f.triples().iter().cloned());
+                }
+            }
+        }
+    }
+
+    // Third pass: reconstruct formulas and add to result
+    for triple in store.iter() {
+        let subj_key = format!("{:?}", triple.subject);
+
+        // Skip log:includes triples (they're metadata)
+        if let Term::Uri(pred) = &triple.predicate {
+            if pred.as_str() == log_includes {
+                continue;
+            }
+            // Skip log:Formula type assertions
+            if pred.as_str() == rdf_type {
+                if let Term::Uri(obj) = &triple.object {
+                    if obj.as_str() == log_formula {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // If subject should be a formula, create one
+        if formula_nodes.contains(&subj_key) {
+            if let Some(contents) = formula_contents.get(&subj_key) {
+                let formula = Term::Formula(FormulaRef::new(0, contents.clone()));
+                result.add(Triple::new(
+                    formula,
+                    triple.predicate.clone(),
+                    triple.object.clone(),
+                ));
+                continue;
+            }
+        }
+
+        // Otherwise, add the triple as-is
+        result.add(triple.clone());
     }
 
     result

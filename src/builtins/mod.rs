@@ -2714,6 +2714,42 @@ impl BuiltinRegistry {
                 BuiltinResult::Failure
             }
         });
+
+        // log:N3Document - type check: a rdf:type log:N3Document if a is a parsed N3 document (formula)
+        // Used to mark subjects that represent N3 documents
+        self.register(&format!("{}N3Document", ns::LOG), |subject, _object, _bindings| {
+            // A formula represents an N3 document
+            if let Term::Formula(_) = subject {
+                BuiltinResult::Success(Bindings::default())
+            } else {
+                BuiltinResult::Failure
+            }
+        });
+
+        // log:Truth - represents truth value class
+        // Used with rdf:type to mark boolean truth values
+        self.register(&format!("{}Truth", ns::LOG), |subject, _object, _bindings| {
+            // Check if subject is a boolean true value
+            if let Term::Literal(lit) = subject {
+                let val = lit.value().to_lowercase();
+                if val == "true" || val == "1" {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
+
+        // log:Falsehood - represents falsehood value class (complement to Truth)
+        self.register(&format!("{}Falsehood", ns::LOG), |subject, _object, _bindings| {
+            // Check if subject is a boolean false value
+            if let Term::Literal(lit) = subject {
+                let val = lit.value().to_lowercase();
+                if val == "false" || val == "0" || val == "" {
+                    return BuiltinResult::Success(Bindings::default());
+                }
+            }
+            BuiltinResult::Failure
+        });
     }
 
     fn register_list(&mut self) {
