@@ -13,7 +13,7 @@
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Ordering as CmpOrdering;
-use super::term::{FolTerm, Variable, Atom, Function, Predicate};
+use super::term::{FolTerm, Atom};
 use super::clause::{Literal, Clause, ClauseDerivation};
 use super::unify::{Substitution, unify, unify_atoms, match_term};
 use super::{ProofResult, ProofStep, Derivation, ProverConfig};
@@ -908,6 +908,7 @@ fn match_atom(pattern: &Atom, target: &Atom) -> Option<Substitution> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::term::{Function, Variable};
 
     #[test]
     fn test_kbo() {

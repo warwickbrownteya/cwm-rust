@@ -9,7 +9,7 @@
 //! - Start clause selection
 //! - Extension and reduction steps
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use super::term::{FolTerm, Variable, Atom, Function, Predicate};
 use super::clause::{Literal, Clause};
 use super::unify::{Substitution, unify_atoms};
@@ -44,6 +44,7 @@ struct MatrixClause {
     /// The literals in the clause
     literals: Vec<Literal>,
     /// Clause index
+    #[allow(dead_code)]
     index: usize,
 }
 
@@ -258,7 +259,7 @@ impl LeanCop {
         max_depth: usize,
     ) -> bool {
         // Look for complementary literal in remaining path
-        for (i, path_lit) in remaining_path.iter().enumerate() {
+        for (_i, path_lit) in remaining_path.iter().enumerate() {
             // Check for complementary literals (same predicate, opposite sign)
             if goal.negated != path_lit.negated
                 && goal.atom.predicate == path_lit.atom.predicate

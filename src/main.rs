@@ -544,6 +544,7 @@ fn skolemize_rules(rules: Vec<Rule>) -> Vec<Rule> {
 /// Result of loading schemas for predicates
 struct SchemaLoadResult {
     triples: Vec<Triple>,
+    #[allow(dead_code)]
     loaded_uris: Vec<String>,
 }
 
@@ -796,6 +797,7 @@ impl ReasoningEngine {
     }
 
     /// List all available engines
+    #[allow(dead_code)]
     fn available() -> &'static [&'static str] {
         &[
             "otter", "prover9", "dpll", "cdcl", "leancop", "nanocop",
@@ -944,7 +946,6 @@ fn run_prover_engine(
     use cwm::prover::{OtterProver, Prover9, ProverConfig, Prover9Config, ProofResult, Derivation};
     use cwm::prover::leancop::{LeanCop, LeanCopConfig, LeanCopResult};
     use cwm::prover::superposition::{SuperpositionProver, SuperpositionConfig};
-    use cwm::prover::dl_tableau::DlTableauConfig;
 
     // Create input in Prover9 format (our native provers understand this format)
     let input_content = create_prover9_input(triples, rules, None);

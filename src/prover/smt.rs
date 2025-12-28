@@ -9,7 +9,7 @@
 //! - Linear Real Arithmetic (LRA)
 //! - Arrays
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use super::dpll::{Var, Lit, SatClause, Assignment};
 
 /// SMT sort (type)
@@ -303,7 +303,7 @@ impl Default for EufSolver {
 }
 
 impl TheorySolver for EufSolver {
-    fn check(&mut self, assignment: &TheoryAssignment) -> TheoryResult {
+    fn check(&mut self, _assignment: &TheoryAssignment) -> TheoryResult {
         if let Some(conflict) = self.check_conflicts() {
             TheoryResult::Unsat(conflict)
         } else {
@@ -539,6 +539,7 @@ pub enum SmtResult {
 /// DPLL(T) SMT Solver
 pub struct SmtSolver {
     /// Configuration
+    #[allow(dead_code)]
     config: SmtConfig,
     /// Theory atoms (term -> boolean variable)
     atoms: HashMap<String, Var>,
@@ -551,6 +552,7 @@ pub struct SmtSolver {
     /// LIA solver
     lia: LiaSolver,
     /// Current boolean assignment
+    #[allow(dead_code)]
     bool_assignment: Assignment,
     /// Next variable
     next_var: Var,
@@ -738,7 +740,7 @@ impl SmtSolver {
     fn build_theory_assignment(&self, bool_assignment: &Assignment) -> TheoryAssignment {
         let mut theory_assign = TheoryAssignment::default();
 
-        for (&var, &(ref term, atom_id)) in &self.atom_info {
+        for (&var, &(ref _term, atom_id)) in &self.atom_info {
             if let Some(value) = bool_assignment.get(var) {
                 theory_assign.literals.push(TheoryLit {
                     atom_id,

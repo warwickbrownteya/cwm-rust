@@ -9,9 +9,9 @@
 //! - Free-variable tableau with unification
 //! - Branch closure detection
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use super::term::{FolTerm, Variable, Atom, Function, Predicate};
-use super::unify::{Substitution, unify_atoms};
+use super::unify::unify_atoms;
 
 /// A formula in the tableau
 #[derive(Debug, Clone, PartialEq)]

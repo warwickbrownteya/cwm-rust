@@ -253,13 +253,13 @@ impl NanoCop {
                 self.from_formula(&Formula::And(Box::new(impl1), Box::new(impl2)), negated)
             }
 
-            Formula::Forall(var, ref body) => {
+            Formula::Forall(_var, ref body) => {
                 // For nanoCoP we handle quantifiers by instantiation during search
                 // For now, treat as the body with the variable
                 self.from_formula(body, negated)
             }
 
-            Formula::Exists(var, ref body) => {
+            Formula::Exists(_var, ref body) => {
                 // Similar to forall
                 self.from_formula(body, negated)
             }

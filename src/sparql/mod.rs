@@ -711,6 +711,7 @@ impl<'a> SparqlParser<'a> {
         Ok(Query::Describe { resources })
     }
 
+    #[allow(dead_code)]
     fn parse_variable_list(&mut self) -> Result<Vec<String>, String> {
         let mut vars = Vec::new();
 

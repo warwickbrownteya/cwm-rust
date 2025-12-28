@@ -10,8 +10,8 @@
 //! - Lexicographic path ordering (LPO)
 //! - Completion procedure
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use super::term::{FolTerm, Variable, Function};
+use std::collections::{HashMap, VecDeque};
+use super::term::{FolTerm, Variable};
 use super::unify::{Substitution, unify};
 
 /// A rewrite rule (l -> r)
@@ -87,7 +87,7 @@ impl LpoOrdering {
                 }
             }
 
-            (FolTerm::Func(_, args), FolTerm::Var(_)) => {
+            (FolTerm::Func(_, _args), FolTerm::Var(_)) => {
                 // s > t if t is a subterm of s
                 if self.contains_var(s, t) {
                     Some(true)
@@ -178,6 +178,7 @@ impl LpoOrdering {
     }
 
     /// Check if term s contains term t as a proper subterm
+    #[allow(dead_code)]
     fn contains_subterm(&self, s: &FolTerm, t: &FolTerm) -> bool {
         if s == t {
             return false; // Not a proper subterm
@@ -573,6 +574,7 @@ impl Default for KnuthBendix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::term::Function;
 
     fn var(name: &str, id: usize) -> FolTerm {
         FolTerm::Var(Variable { name: name.to_string(), id })

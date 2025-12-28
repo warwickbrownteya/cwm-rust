@@ -96,6 +96,7 @@ impl Default for TermOrdering {
 #[derive(Debug, Clone)]
 struct AgedClause {
     clause: Clause,
+    #[allow(dead_code)]
     age: usize,
 }
 
