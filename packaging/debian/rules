@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo_home
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release
+
+override_dh_auto_install:
+	install -D -m 755 target/release/cwm debian/cwm/usr/bin/cwm
+	install -D -m 644 completions/cwm.bash debian/cwm/usr/share/bash-completion/completions/cwm
+	install -D -m 644 completions/cwm.zsh debian/cwm/usr/share/zsh/vendor-completions/_cwm
+	install -D -m 644 completions/cwm.fish debian/cwm/usr/share/fish/vendor_completions.d/cwm.fish
+	install -D -m 644 man/cwm.1 debian/cwm/usr/share/man/man1/cwm.1
+
+override_dh_auto_test:
+	cargo test --release
+
+override_dh_auto_clean:
+	cargo clean
+	rm -rf debian/cargo_home

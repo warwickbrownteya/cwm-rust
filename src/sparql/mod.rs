@@ -3,6 +3,20 @@
 //! Implements a subset of SPARQL 1.1 for querying RDF graphs.
 //! Includes federated query support via SERVICE keyword.
 
+pub mod cache;
+pub mod path;
+pub mod dataset_engine;
+pub mod update;
+pub mod federated;
+pub mod optimizer;
+
+pub use cache::{QueryCache, CacheConfig, CacheStats, SharedQueryCache, create_shared_cache};
+pub use path::{PathEvaluator, PathConfig, PathStats, PathAnalysis};
+pub use dataset_engine::{DatasetEngine, execute_sparql_dataset};
+pub use update::{Update, UpdateEngine, UpdateResult, QuadData, QuadTemplate, GraphTarget, parse_update};
+pub use federated::{FederatedEngine, FederatedConfig, FederatedStats, ServiceQuery, ServiceResult};
+pub use optimizer::{QueryOptimizer, OptimizerConfig, DataStatistics, QueryPlan, PlanNode, JoinType, IndexHint, OptimizerStats, TriplePattern as OptTriplePattern, PatternTerm};
+
 use std::collections::HashMap;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use crate::term::{Term, Triple};
@@ -192,7 +206,7 @@ pub struct OrderCondition {
 }
 
 /// Query results
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum QueryResult {
     /// SELECT query results
     Bindings {
@@ -2499,7 +2513,7 @@ impl<'a> SparqlEngine<'a> {
         }
     }
 
-    /// Evaluate a property path pattern
+    /// Evaluate a property path pattern using the optimized PathEvaluator
     fn evaluate_property_path(
         &self,
         path: &PropertyPath,
@@ -2508,6 +2522,9 @@ impl<'a> SparqlEngine<'a> {
         solutions: Vec<HashMap<String, Term>>,
     ) -> Vec<HashMap<String, Term>> {
         let mut new_solutions = Vec::new();
+
+        // Use the optimized path evaluator
+        let mut path_eval = path::PathEvaluator::new(self.store);
 
         for solution in solutions {
             // Get bound subject if variable is already bound
@@ -2524,8 +2541,8 @@ impl<'a> SparqlEngine<'a> {
                 TermPattern::Path(_) => None,
             };
 
-            // Evaluate the path and get all (subject, object) pairs
-            let pairs = self.evaluate_path_pairs(path, subj_bound.as_ref(), obj_bound.as_ref());
+            // Evaluate the path using optimized evaluator
+            let pairs = path_eval.evaluate(path, subj_bound.as_ref(), obj_bound.as_ref());
 
             // For each matching pair, create new bindings
             for (s, o) in pairs {
@@ -2564,6 +2581,10 @@ impl<'a> SparqlEngine<'a> {
     }
 
     /// Evaluate a property path and return all matching (subject, object) pairs
+    ///
+    /// Note: This method is superseded by the optimized PathEvaluator in path.rs
+    /// but kept for reference and potential fallback use.
+    #[allow(dead_code)]
     fn evaluate_path_pairs(
         &self,
         path: &PropertyPath,
@@ -2732,6 +2753,9 @@ impl<'a> SparqlEngine<'a> {
     }
 
     /// Helper for transitive closure computation
+    ///
+    /// Note: Superseded by PathEvaluator::transitive_closure_optimized
+    #[allow(dead_code)]
     fn transitive_closure(
         &self,
         path: &PropertyPath,
@@ -2760,6 +2784,9 @@ impl<'a> SparqlEngine<'a> {
     }
 
     /// Collect all nodes (subjects and objects) in the store
+    ///
+    /// Note: Superseded by PathEvaluator::collect_all_nodes
+    #[allow(dead_code)]
     fn collect_all_nodes(&self) -> Vec<Term> {
         let mut nodes = std::collections::HashSet::new();
         for triple in self.store.iter() {

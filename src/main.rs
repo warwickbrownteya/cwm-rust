@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indexmap::IndexMap;
 
-use cwm::{Store, Reasoner, ReasonerConfig, parse, parse_rdfxml, ParseResult, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule, List, set_run_prefix};
+use cwm::{Store, SqliteStore, Reasoner, ReasonerConfig, parse, parse_rdfxml, ParseResult, Term, Triple, FormulaRef, Literal, Datatype, execute_sparql, QueryResult, format_results_xml, format_results_json, Rule, List, set_run_prefix};
 use cwm::term::Variable;
 use cwm::fuseki::FusekiStoreBuilder;
 use cwm::core::TripleStore;
@@ -356,6 +356,10 @@ struct Cli {
     /// Output revision/version information
     #[arg(long)]
     revision: bool,
+
+    /// Use SQLite database as persistent backend store
+    #[arg(long = "db", value_name = "PATH")]
+    db_path: Option<PathBuf>,
 
     /// Use Fuseki SPARQL endpoint as backend store
     #[arg(long = "fuseki", value_name = "URL")]
@@ -1291,6 +1295,15 @@ fn main() -> Result<()> {
     let mut all_prefixes: IndexMap<String, String> = IndexMap::new();
     let mut all_rules = Vec::new();
 
+    // Add RDFS entailment rules if rdfs profile is active
+    if cli.profile.as_deref() == Some("rdfs") {
+        use cwm::RdfsRules;
+        all_rules.extend(RdfsRules::all());
+        if cli.verbose && !cli.quiet {
+            eprintln!("Added {} RDFS entailment rules", RdfsRules::all().len());
+        }
+    }
+
     // Collect input content
     let mut content = String::new();
 
@@ -1324,6 +1337,30 @@ fn main() -> Result<()> {
     };
 
     let mut store = Store::new();
+
+    // Track SQLite store for persistence at the end
+    let sqlite_store_path = cli.db_path.clone();
+
+    // If SQLite database specified, load existing data from it
+    if let Some(ref db_path) = cli.db_path {
+        if !cli.quiet && cli.verbose {
+            eprintln!("Opening SQLite database: {}", db_path.display());
+        }
+        match SqliteStore::open(db_path) {
+            Ok(sqlite_store) => {
+                let existing = sqlite_store.to_vec();
+                if !cli.quiet && cli.verbose {
+                    eprintln!("Loaded {} triples from SQLite", existing.len());
+                }
+                store.add_all(existing);
+            }
+            Err(e) => {
+                if !cli.quiet {
+                    eprintln!("Warning: Could not open SQLite database: {}. Starting with empty store.", e);
+                }
+            }
+        }
+    }
 
     // If Fuseki endpoint specified, load existing data from it
     let fuseki_store = if let Some(ref endpoint) = cli.fuseki_endpoint {
@@ -1890,6 +1927,39 @@ fn main() -> Result<()> {
 
         if !cli.quiet && cli.verbose {
             eprintln!("Successfully synced to Fuseki");
+        }
+    }
+
+    // Save results to SQLite if database specified
+    if let Some(ref db_path) = sqlite_store_path {
+        if !cli.quiet && cli.verbose {
+            eprintln!("Saving {} triples to SQLite", output_store.len());
+        }
+
+        match SqliteStore::open(db_path) {
+            Ok(mut sqlite_store) => {
+                // Clear existing data and push new results
+                sqlite_store.clear();
+
+                // Use batch add for efficiency
+                sqlite_store.add_batch(output_store.iter().cloned());
+
+                // Flush to ensure data is written
+                if let Err(e) = sqlite_store.flush() {
+                    if !cli.quiet {
+                        eprintln!("Warning: Failed to flush SQLite: {}", e);
+                    }
+                }
+
+                if !cli.quiet && cli.verbose {
+                    eprintln!("Successfully saved to SQLite");
+                }
+            }
+            Err(e) => {
+                if !cli.quiet {
+                    eprintln!("Warning: Could not save to SQLite database: {}", e);
+                }
+            }
         }
     }
 

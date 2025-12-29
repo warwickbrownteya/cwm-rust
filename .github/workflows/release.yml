@@ -1,0 +1,257 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Get version
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          release_name: cwm ${{ steps.get_version.outputs.version }}
+          draft: true
+          prerelease: false
+          body: |
+            ## cwm ${{ steps.get_version.outputs.version }}
+
+            ### Installation
+
+            #### Quick Install (macOS/Linux)
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/cwm-rust/cwm-rust/main/install.sh | bash
+            ```
+
+            #### Homebrew (macOS)
+            ```bash
+            brew tap cwm-rust/cwm
+            brew install cwm
+            ```
+
+            #### Cargo
+            ```bash
+            cargo install cwm
+            ```
+
+            ### Downloads
+            See assets below for pre-built binaries.
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: cwm-linux-x86_64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: cwm-linux-x86_64-musl
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: cwm-linux-aarch64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: cwm-linux-aarch64-musl
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: cwm-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: cwm-macos-aarch64
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: cwm-windows-x86_64
+            ext: .exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            name: cwm-windows-aarch64
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              sudo apt-get install -y gcc-aarch64-linux-gnu
+              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+              ;;
+            x86_64-unknown-linux-musl|aarch64-unknown-linux-musl)
+              sudo apt-get install -y musl-tools
+              ;;
+          esac
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/cwm dist/
+          cp README.md LICENSE dist/ || true
+          cp -r completions dist/ || true
+          cp -r man dist/ || true
+          cd dist
+          tar -czvf ../${{ matrix.name }}.tar.gz *
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/cwm.exe" -Destination "dist/"
+          Copy-Item "README.md" -Destination "dist/" -ErrorAction SilentlyContinue
+          Copy-Item "LICENSE" -Destination "dist/" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.name }}.zip"
+
+      - name: Upload Release Asset (Unix)
+        if: matrix.os != 'windows-latest'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./${{ matrix.name }}.tar.gz
+          asset_name: ${{ matrix.name }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Release Asset (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./${{ matrix.name }}.zip
+          asset_name: ${{ matrix.name }}.zip
+          asset_content_type: application/zip
+
+  build-deb:
+    name: Build Debian Package
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build .deb package
+        run: cargo deb
+
+      - name: Upload .deb
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/debian/cwm_${{ needs.create-release.outputs.version }}_amd64.deb
+          asset_name: cwm_${{ needs.create-release.outputs.version }}_amd64.deb
+          asset_content_type: application/vnd.debian.binary-package
+
+  build-rpm:
+    name: Build RPM Package
+    needs: create-release
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: dnf install -y rust cargo rpm-build
+
+      - name: Install cargo-rpm
+        run: cargo install cargo-generate-rpm
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Build RPM
+        run: cargo generate-rpm
+
+      - name: Upload RPM
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/generate-rpm/cwm-${{ needs.create-release.outputs.version }}-1.x86_64.rpm
+          asset_name: cwm-${{ needs.create-release.outputs.version }}-1.x86_64.rpm
+          asset_content_type: application/x-rpm
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Publish
+        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: [build, create-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew tap
+        uses: mislav/bump-homebrew-formula-action@v2
+        with:
+          formula-name: cwm
+          homebrew-tap: cwm-rust/homebrew-cwm
+          download-url: https://github.com/cwm-rust/cwm-rust/releases/download/${{ needs.create-release.outputs.version }}/cwm-macos-x86_64.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        continue-on-error: true

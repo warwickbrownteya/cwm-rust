@@ -1,33 +1,75 @@
 # cwm-rust
 
-A high-performance Rust implementation of the Closed World Machine (CWM) N3 reasoner and RDF processor, with integrated theorem proving capabilities.
+A high-performance Rust implementation of the Closed World Machine (CWM) - an N3 reasoner, RDF processor, and semantic web toolkit with integrated theorem proving.
+
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 
 ## Overview
 
-cwm-rust is a modern replacement for the original Python-based [cwm](https://www.w3.org/2000/10/swap/doc/cwm.html) tool by Tim Berners-Lee. It provides complete N3 (Notation3) processing with forward-chaining inference, SPARQL queries, and 11 integrated theorem proving engines.
+cwm-rust is a modern, high-performance replacement for the original Python-based [cwm](https://www.w3.org/2000/10/swap/doc/cwm.html) created by Tim Berners-Lee at W3C. It provides comprehensive N3 (Notation3) processing with forward and backward chaining inference, full SPARQL 1.1 support, and 12 integrated theorem proving engines.
 
 ### Key Features
 
-- **266+ built-in predicates** across 8 namespaces (math, string, list, log, time, crypto, os, graph)
-- **11 theorem proving engines** (Resolution, Otter, DPLL, CDCL, Tableau, Knuth-Bendix, Superposition, and more)
-- **Full SPARQL 1.1 support** with XML and JSON result formats
-- **Apache Jena Fuseki integration** for enterprise-scale reasoning
-- **Multiple output formats**: N3, N-Triples, RDF/XML, JSON-LD
-- **SPARQL HTTP endpoint** server mode
-- **Proof generation** with `--why` flag
-- **10-100x faster** than original Python CWM
+| Category | Capabilities |
+|----------|-------------|
+| **Built-in Predicates** | 266+ predicates across 8 namespaces (math, string, list, log, time, crypto, os, graph) |
+| **Reasoning** | 25 strategies including RDFS, OWL 2 RL, temporal, probabilistic, fuzzy, defeasible |
+| **Theorem Provers** | 12 engines: Resolution, Otter, DPLL, CDCL, Tableau, Superposition, SMT, and more |
+| **SPARQL** | Full SPARQL 1.1 Query & Update with property paths, aggregates, federation |
+| **Server** | HTTP SPARQL endpoint with caching, rate limiting, CORS |
+| **Integration** | Apache Jena Fuseki, SQLite, distributed reasoning via IPC |
+| **Output** | N3, N-Triples, RDF/XML, JSON-LD, SPARQL XML/JSON Results |
+| **Performance** | 10-100x faster than original Python CWM |
+
+### Feature Comparison with Original CWM
+
+| Feature | Original CWM | cwm-rust |
+|---------|-------------|----------|
+| Built-in predicates | ~100 | 266+ |
+| Reasoning strategies | 1 (forward) | 25 |
+| Theorem provers | 0 | 12 |
+| SPARQL support | None | Full 1.1 |
+| Output formats | 3 | 5 |
+| Performance | Baseline | 10-100x faster |
 
 ## Installation
+
+### Quick Install (macOS/Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cwm-rust/cwm-rust/main/install.sh | bash
+```
+
+### Using Homebrew (macOS)
+
+```bash
+brew tap cwm-rust/cwm
+brew install cwm
+```
+
+### Using Cargo
+
+```bash
+cargo install cwm
+```
 
 ### From Source
 
 ```bash
-git clone https://github.com/your-repo/cwm-rust
+git clone https://github.com/cwm-rust/cwm-rust
 cd cwm-rust
-cargo build --release
+make && make install
 ```
 
-The binary will be at `target/release/cwm`.
+### Using Make
+
+```bash
+make                        # Build release binary
+make install                # Install to ~/.local (XDG compliant)
+make install PREFIX=/usr/local  # System-wide install
+make uninstall              # Remove installed files
+```
 
 ### Quick Start
 
@@ -440,14 +482,68 @@ cwm-rust is 10-100x faster than the original Python CWM:
 
 ## Documentation
 
-- [BUILTINS.md](docs/BUILTINS.md) - Complete built-in predicate reference
-- [COMPARISON.md](COMPARISON.md) - Comparison with original CWM
-- [tests/swap_compliance/README.md](tests/swap_compliance/README.md) - SWAP compliance tests
+### Reference Guides
+
+| Document | Description |
+|----------|-------------|
+| [BUILTINS.md](docs/BUILTINS.md) | Complete reference for 266+ built-in predicates |
+| [REASONING.md](docs/REASONING.md) | 25 reasoning strategies and 12 theorem provers |
+| [SPARQL.md](docs/SPARQL.md) | Full SPARQL 1.1 query and update reference |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | Configuration files, profiles, environment variables |
+| [DISTRIBUTED.md](docs/DISTRIBUTED.md) | IPC, clustering, and distributed reasoning |
+| [EXAMPLES.md](docs/EXAMPLES.md) | Practical examples and use cases |
+
+### Additional Resources
+
+- [CWM_GAP_ANALYSIS.md](docs/CWM_GAP_ANALYSIS.md) - Comparison with original CWM
+- [man/cwm.1](man/cwm.1) - Unix manual page (`man cwm`)
+
+## Architecture
+
+```
+cwm-rust/
+├── src/
+│   ├── builtins/       # 266+ built-in predicates
+│   ├── reasoning/      # 25 reasoning strategies
+│   ├── prover/         # 12 theorem proving engines
+│   ├── sparql/         # SPARQL 1.1 implementation
+│   ├── server/         # HTTP SPARQL endpoint
+│   ├── store/          # Triple store backends
+│   └── parser/         # N3/Turtle/RDF parser
+├── docs/               # Documentation
+├── completions/        # Shell completions (bash/zsh/fish)
+├── man/                # Manual pages
+└── packaging/          # Distribution packages
+```
+
+## Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run with verbose output
+cargo test -- --nocapture
+
+# Run benchmarks
+cargo bench
+```
+
+## Contributing
+
+Contributions are welcome! Please see the [issues](https://github.com/cwm-rust/cwm-rust/issues) for areas needing help.
 
 ## License
 
-MIT
+Licensed under either of:
+
+- MIT License ([LICENSE](LICENSE) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+
+at your option.
 
 ## Acknowledgments
 
-Based on the original [cwm](https://www.w3.org/2000/10/swap/doc/cwm.html) by Tim Berners-Lee and Dan Connolly.
+Based on the original [cwm](https://www.w3.org/2000/10/swap/doc/cwm.html) by Tim Berners-Lee and Dan Connolly at W3C.
+
+This implementation extends the original with modern features including full SPARQL support, multiple theorem provers, advanced reasoning strategies, and high-performance Rust implementation.

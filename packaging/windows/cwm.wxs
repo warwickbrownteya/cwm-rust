@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows Installer (MSI) configuration for cwm
+  Build with: cargo wix
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product
+        Id="*"
+        Name="cwm"
+        Version="0.1.0"
+        Manufacturer="CWM-Rust Contributors"
+        Language="1033"
+        Codepage="1252"
+        UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+
+        <Package
+            Id="*"
+            Keywords="Installer"
+            Description="CWM - Closed World Machine Installer"
+            Comments="N3 reasoner and RDF processor"
+            Manufacturer="CWM-Rust Contributors"
+            InstallerVersion="500"
+            Languages="1033"
+            Compressed="yes"
+            InstallScope="perMachine"
+            SummaryCodepage="1252"/>
+
+        <MajorUpgrade
+            Schedule="afterInstallInitialize"
+            DowngradeErrorMessage="A newer version of [ProductName] is already installed. Setup will now exit."/>
+
+        <Media Id="1" Cabinet="cwm.cab" EmbedCab="yes"/>
+
+        <Property Id="ARPHELPLINK" Value="https://github.com/cwm-rust/cwm-rust"/>
+        <Property Id="ARPURLINFOABOUT" Value="https://github.com/cwm-rust/cwm-rust"/>
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder" Name="PFiles">
+                <Directory Id="APPLICATIONFOLDER" Name="cwm">
+                    <Component Id="CwmExecutable" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901" Win64="yes">
+                        <File
+                            Id="cwm.exe"
+                            Name="cwm.exe"
+                            Source="target\release\cwm.exe"
+                            KeyPath="yes"/>
+                        <Environment
+                            Id="PATH"
+                            Name="PATH"
+                            Value="[APPLICATIONFOLDER]"
+                            Permanent="no"
+                            Part="last"
+                            Action="set"
+                            System="yes"/>
+                    </Component>
+                    <Component Id="License" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012" Win64="yes">
+                        <File
+                            Id="LICENSE"
+                            Name="LICENSE"
+                            Source="LICENSE"
+                            KeyPath="yes"/>
+                    </Component>
+                    <Component Id="Readme" Guid="D4E5F6A7-B8C9-0123-DEF0-123456789013" Win64="yes">
+                        <File
+                            Id="README.md"
+                            Name="README.md"
+                            Source="README.md"
+                            KeyPath="yes"/>
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id="MainProgram"
+            Title="CWM"
+            Description="Closed World Machine - N3 reasoner and RDF processor"
+            Level="1"
+            ConfigurableDirectory="APPLICATIONFOLDER"
+            AllowAdvertise="no"
+            Display="expand"
+            Absent="disallow">
+            <ComponentRef Id="CwmExecutable"/>
+            <ComponentRef Id="License"/>
+            <ComponentRef Id="Readme"/>
+        </Feature>
+
+        <UIRef Id="WixUI_InstallDir"/>
+        <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER"/>
+
+    </Product>
+</Wix>

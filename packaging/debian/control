@@ -1,0 +1,31 @@
+Source: cwm
+Section: science
+Priority: optional
+Maintainer: CWM-Rust Contributors <cwm-rust@example.org>
+Build-Depends: debhelper (>= 12), cargo, rustc (>= 1.75)
+Standards-Version: 4.5.0
+Homepage: https://github.com/cwm-rust/cwm-rust
+Vcs-Browser: https://github.com/cwm-rust/cwm-rust
+Vcs-Git: https://github.com/cwm-rust/cwm-rust.git
+Rules-Requires-Root: no
+
+Package: cwm
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Suggests: raptor2-utils, eye, apache-jena
+Description: Closed World Machine - N3 reasoner and RDF processor
+ CWM-Rust is a high-performance implementation of the Closed World Machine,
+ an N3 (Notation3) reasoner and RDF processor originally created by
+ Tim Berners-Lee at W3C.
+ .
+ Features include:
+  - 302+ built-in predicates (math, string, list, log, time, crypto)
+  - Full SPARQL 1.1 query and update support
+  - 11 theorem proving engines
+  - Forward and backward chaining inference
+  - OWL 2 RL profile support
+  - RDFS entailment rules
+  - Advanced reasoning: fuzzy logic, probabilistic, temporal
+  - Distributed reasoning with Raft consensus
+  - HTTP SPARQL endpoint server
+  - Apache Jena Fuseki integration

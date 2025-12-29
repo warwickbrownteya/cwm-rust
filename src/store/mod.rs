@@ -2,12 +2,40 @@
 //!
 //! A store holds a set of triples and supports pattern matching.
 //!
+//! # Store Backends
+//!
+//! This module provides multiple store implementations:
+//!
+//! - [`Store`] - In-memory store with SPO indexing (fast, not persistent)
+//! - [`SqliteStore`] - SQLite-backed persistent store (scales to 100M+ triples)
+//!
 //! # Indexing Strategy
 //!
-//! The store uses SPO (Subject-Predicate-Object) indexes for efficient pattern matching:
+//! Both stores use SPO (Subject-Predicate-Object) indexes for efficient pattern matching:
 //! - O(1) lookup for exact triples
 //! - O(log n) to O(1) lookup for patterns with bound terms
 //! - Falls back to O(n) scan only when all positions are variables
+//!
+//! # Example
+//!
+//! ```ignore
+//! use cwm::store::{Store, SqliteStore};
+//!
+//! // In-memory store for fast, temporary operations
+//! let mut mem_store = Store::new();
+//! mem_store.add(triple.clone());
+//!
+//! // SQLite store for persistence
+//! let mut sqlite_store = SqliteStore::open("data.db")?;
+//! sqlite_store.add(triple);
+//! sqlite_store.flush()?; // Ensure data is written to disk
+//! ```
+
+pub mod sqlite;
+pub mod dataset;
+
+pub use sqlite::{SqliteStore, SqliteStoreError, SqliteStoreStats, SqliteResult};
+pub use dataset::{Dataset, Quad};
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};

@@ -6,6 +6,13 @@
 //! - Built-in predicate evaluation
 //! - Proof generation for inference tracking
 //! - Tabling/memoization for cycle detection and performance
+//! - Incremental reasoning with dependency tracking
+//! - Human-readable explanation generation
+
+pub mod proof;
+pub mod parallel;
+pub mod incremental;
+pub mod explanation;
 
 use crate::term::{Term, Triple, Variable, Bindings, substitute_triple};
 use crate::store::Store;

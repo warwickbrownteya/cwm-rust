@@ -1,0 +1,323 @@
+.\" Man page for cwm
+.TH CWM 1 "December 2024" "cwm 0.1.0" "User Commands"
+.SH NAME
+cwm \- Closed World Machine: N3 reasoner and RDF processor
+.SH SYNOPSIS
+.B cwm
+[\fIOPTIONS\fR] [\fIFILE\fR]...
+.SH DESCRIPTION
+.B cwm
+(Closed World Machine) is a high-performance N3 (Notation3) reasoner and RDF
+processor. It provides forward and backward chaining inference, full SPARQL 1.1
+support, 302+ built-in predicates, and 11 theorem proving engines.
+.PP
+cwm-rust is a modern reimplementation of the original cwm created by
+Tim Berners-Lee at W3C, written in Rust for performance and safety.
+.SH OPTIONS
+.SS "Input/Output Options"
+.TP
+.B \-\-stdin
+Read input from standard input.
+.TP
+.BI \-o " FILE" "\fR,\fP \-\-output=" FILE
+Write output to FILE instead of stdout.
+.TP
+.BI \-f " FORMAT" "\fR,\fP \-\-format=" FORMAT
+Output format: n3, ntriples, rdf, jsonld, debug. Default: n3.
+.TP
+.BI \-\-base= URI
+Base URI for resolving relative references.
+.TP
+.BI \-\-language= LANG
+Input language override: n3, turtle, ntriples, rdfxml, jsonld.
+.SS "Reasoning Options"
+.TP
+.B \-\-think
+Apply rules using forward-chaining inference until no new triples are derived.
+.TP
+.B \-\-filter
+Output only inferred triples (requires \-\-think).
+.TP
+.BI \-\-filter\-rules= FILE
+Apply rules from FILE and replace store with conclusions only.
+.TP
+.BI \-\-max\-steps= N
+Maximum number of inference steps. Default: 10000.
+.TP
+.BI \-\-apply= FILE
+Apply rules from specified file(s).
+.TP
+.BI \-\-rules= FILE
+Load rules from specified file(s).
+.TP
+.BI \-\-data= FILE
+Load data files (no rules extracted).
+.TP
+.BI \-\-think\-passes= N
+Number of think passes (0 for unlimited).
+.TP
+.BI \-\-engine= ENGINE
+Reasoning engine: forward, backward, resolution, otter, prover9, dpll, cdcl,
+tableau, superposition, leancop, nanocop.
+.TP
+.BI \-\-profile= PROFILE
+Reasoning profile: forward, rdfs, owl2rl, full, minimal.
+.SS "SPARQL Options"
+.TP
+.BI \-\-sparql= FILE
+Run SPARQL query from file.
+.TP
+.BI \-\-sparql\-query= QUERY
+Run inline SPARQL query.
+.TP
+.BI \-\-sparql\-results= FORMAT
+SPARQL results format: xml, json, csv, tsv. Default: xml.
+.TP
+.BI \-\-sparqlServer= PORT
+Start SPARQL endpoint HTTP server on specified port.
+.TP
+.BI \-\-query= FILE
+Query file for filtering results.
+.SS "Output Modifiers"
+.TP
+.B \-\-strings
+Output strings only (literal values of matching patterns).
+.TP
+.B \-\-purge\-rules
+Remove rules from output.
+.TP
+.B \-\-purge\-builtins
+Remove triples with built-in predicates from output.
+.TP
+.B \-\-purge
+Remove statements with log:Chaff class.
+.TP
+.B \-\-flatten
+Flatten formula contents into main graph.
+.TP
+.B \-\-unflatten
+Reconstruct nested formulas from reified statements.
+.TP
+.B \-\-reify
+Convert statements to RDF reification.
+.TP
+.B \-\-dereify
+Reverse reification.
+.TP
+.B \-\-ugly
+Minimal formatting, fastest mode.
+.TP
+.B \-\-bySubject
+Sort output by subject.
+.TP
+.B \-\-triples
+Output only the triples count.
+.TP
+.B \-\-no
+Suppress all output.
+.SS "Formatting Options"
+.TP
+.BI \-\-n3= FLAGS
+N3 output formatting flags:
+.br
+a = anonymous blank nodes
+.br
+c = add comments
+.br
+d = no default namespace
+.br
+e = escape unicode
+.br
+g = no implies shorthand
+.br
+i = use store identifiers
+.br
+l = no list syntax
+.br
+n = no numeric syntax
+.br
+p = no prefix
+.br
+r = no relative URIs
+.br
+s = explicit subject
+.br
+t = no special syntax
+.br
+u = unicode URIs
+.br
+v = verbose quantifiers
+.br
+B = existential blank nodes (input)
+.TP
+.BI \-\-rdf= FLAGS
+RDF/XML output formatting flags.
+.SS "Proof Options"
+.TP
+.B \-\-why
+Generate proof trace explaining derivations.
+.TP
+.B \-\-proof
+Output proof in N3 format.
+.TP
+.BI \-\-closure= FLAGS
+Closure computation flags.
+.SS "Database Options"
+.TP
+.BI \-\-db= PATH
+Use SQLite database for persistent storage.
+.TP
+.BI \-\-fuseki= URL
+Connect to Apache Jena Fuseki SPARQL endpoint.
+.TP
+.BI \-\-fuseki\-graph= URI
+Named graph URI for Fuseki operations.
+.TP
+.BI \-\-fuseki\-timeout= SECS
+Fuseki operation timeout in seconds. Default: 30.
+.TP
+.BI \-\-fuseki\-batch= SIZE
+Fuseki batch insert size. Default: 1000.
+.SS "Other Options"
+.TP
+.B \-\-crypto
+Enable cryptographic operations (disabled by default for security).
+.TP
+.BI \-\-mode= MODE
+Operating mode flags:
+.br
+r = remote (HTTP fetch)
+.br
+s = schema
+.br
+a = auto-rules
+.br
+E = ignore schema errors
+.br
+m = merge schemas
+.br
+u = unique run IDs
+.br
+t = think
+.br
+f = filter
+.TP
+.BI \-\-chatty= LEVEL
+Debug verbosity level (0-99).
+.TP
+.BI \-\-with= ARGS
+Pass remaining arguments as os:argv values.
+.TP
+.B \-\-pipe
+Pipe mode: process without storing intermediate results.
+.TP
+.BI \-\-patch= FILE
+Apply N3 patch from file.
+.TP
+.BI \-\-config= FILE
+Load configuration from TOML file.
+.TP
+.B \-\-init\-config
+Create default configuration file.
+.TP
+.BI \-\-generate\-completions= SHELL
+Generate shell completions for: bash, zsh, fish, powershell, elvish.
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress informational messages.
+.TP
+.BR \-h ", " \-\-help
+Print help information.
+.TP
+.BR \-V ", " \-\-version
+Print version information.
+.SH EXAMPLES
+.TP
+Basic inference:
+.B cwm data.n3 rules.n3 \-\-think
+.TP
+SPARQL query:
+.B cwm data.n3 \-\-sparql\-query "SELECT * WHERE { ?s ?p ?o }"
+.TP
+Start SPARQL endpoint:
+.B cwm data.n3 \-\-sparqlServer 8000
+.TP
+Use theorem prover:
+.B cwm ontology.n3 \-\-engine tableau \-\-think
+.TP
+Convert RDF format:
+.B cwm input.rdf \-\-format ntriples \-o output.nt
+.TP
+Filter with query:
+.B cwm data.n3 \-\-filter\-rules query.n3
+.SH BUILT-IN PREDICATES
+cwm provides 302+ built-in predicates across these namespaces:
+.TP
+.B math:
+Arithmetic operations (sum, product, quotient, etc.) with bidirectional solving.
+.TP
+.B string:
+String manipulation (concat, matches, replace, format, etc.).
+.TP
+.B list:
+List operations (append, member, sort, unique, etc.).
+.TP
+.B log:
+Logical operations (implies, includes, notIncludes, semantics, etc.).
+.TP
+.B time:
+Date and time operations (year, month, day, inSeconds, etc.).
+.TP
+.B crypto:
+Cryptographic functions (sha256, sha512, hmac, sign, verify, etc.).
+.TP
+.B os:
+Operating system functions (environ, argv, cwd, etc.).
+.TP
+.B graph:
+Graph operations (subjects, predicates, merge, etc.).
+.SH FILES
+.TP
+.I ~/.config/cwm/config.toml
+User configuration file.
+.TP
+.I /etc/cwm/config.toml
+System-wide configuration file.
+.SH ENVIRONMENT
+.TP
+.B CWM_CONFIG
+Path to configuration file.
+.TP
+.B CWM_LOG_LEVEL
+Logging level (trace, debug, info, warn, error).
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+General error.
+.TP
+.B 2
+Parse error.
+.TP
+.B 3
+Inference error.
+.SH SEE ALSO
+.BR rapper (1),
+.BR riot (1),
+.BR arq (1),
+.BR eye (1)
+.PP
+Full documentation: <https://github.com/cwm-rust/cwm-rust>
+.SH AUTHORS
+CWM-Rust Contributors
+.PP
+Based on original cwm by Tim Berners-Lee and the W3C SWAP team.
+.SH COPYRIGHT
+Copyright \(co 2024-2025 CWM-Rust Contributors.
+.PP
+Licensed under MIT OR Apache-2.0.

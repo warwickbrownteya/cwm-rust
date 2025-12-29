@@ -29,7 +29,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Query, State},
@@ -43,7 +43,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::store::Store;
-use crate::sparql::{execute_sparql, format_results_xml, format_results_json};
+use crate::sparql::{execute_sparql, format_results_xml, format_results_json, QueryCache, CacheStats};
 
 // ============================================================================
 // Configuration
@@ -72,6 +72,12 @@ pub struct ServerConfig {
     pub max_query_length: usize,
     /// Maximum results to return
     pub max_results: usize,
+    /// Enable query result caching
+    pub enable_cache: bool,
+    /// Maximum cache entries
+    pub cache_max_entries: usize,
+    /// Cache TTL in seconds
+    pub cache_ttl_secs: u64,
 }
 
 impl ServerConfig {
@@ -88,7 +94,18 @@ impl ServerConfig {
             rate_limit_burst: 200,
             max_query_length: 1_000_000, // 1MB query limit
             max_results: 100_000, // 100k results max
+            enable_cache: true,
+            cache_max_entries: 1000,
+            cache_ttl_secs: 300, // 5 minutes
         }
+    }
+
+    /// Configure query result caching
+    pub fn with_cache(mut self, enabled: bool, max_entries: usize, ttl_secs: u64) -> Self {
+        self.enable_cache = enabled;
+        self.cache_max_entries = max_entries;
+        self.cache_ttl_secs = ttl_secs;
+        self
     }
 
     /// Set the host to bind to
@@ -229,6 +246,8 @@ pub struct AppState {
     pub config: ServerConfig,
     /// Rate limiter (optional)
     pub rate_limiter: Option<RateLimiter>,
+    /// Query result cache (optional)
+    pub query_cache: Option<QueryCache>,
 }
 
 impl AppState {
@@ -240,10 +259,20 @@ impl AppState {
             None
         };
 
+        let query_cache = if config.enable_cache {
+            Some(QueryCache::with_size_and_ttl(
+                config.cache_max_entries,
+                Duration::from_secs(config.cache_ttl_secs),
+            ))
+        } else {
+            None
+        };
+
         Self {
             store: RwLock::new(store),
             config,
             rate_limiter,
+            query_cache,
         }
     }
 
@@ -255,6 +284,15 @@ impl AppState {
             }
         }
         None
+    }
+
+    /// Get cache statistics
+    pub async fn cache_stats(&self) -> Option<CacheStats> {
+        if let Some(ref cache) = self.query_cache {
+            Some(cache.stats().await)
+        } else {
+            None
+        }
     }
 }
 
@@ -455,10 +493,25 @@ async fn execute_sparql_query(
         .map(|f| f == "json")
         .unwrap_or_else(|| accept.contains("json"));
 
-    // Execute query (read lock on store)
-    let store = state.store.read().await;
-    let result = execute_sparql(&store, query)
-        .map_err(|e| ErrorResponse::sparql_error(e))?;
+    // Check cache first
+    let result = if let Some(ref cache) = state.query_cache {
+        if let Some(cached) = cache.get(query).await {
+            // Cache hit - use cached result
+            cached
+        } else {
+            // Cache miss - execute query and cache result
+            let store = state.store.read().await;
+            let result = execute_sparql(&store, query)
+                .map_err(|e| ErrorResponse::sparql_error(e))?;
+            cache.put(query, result.clone()).await;
+            result
+        }
+    } else {
+        // No cache - execute query directly
+        let store = state.store.read().await;
+        execute_sparql(&store, query)
+            .map_err(|e| ErrorResponse::sparql_error(e))?
+    };
 
     // Format result
     let (content_type, body) = if use_json {
@@ -551,6 +604,8 @@ LIMIT 25</textarea>
         <li><code>POST /sparql</code> - Execute query from body</li>
         <li><code>GET /health</code> - Health check</li>
         <li><code>GET /stats</code> - Store statistics</li>
+        <li><code>GET /cache/stats</code> - Query cache statistics</li>
+        <li><code>POST /cache/clear</code> - Clear query cache</li>
     </ul>
 </body>
 </html>"#)
@@ -576,11 +631,27 @@ async fn stats(State(state): State<SharedState>) -> impl IntoResponse {
         })
     }).unwrap_or_else(|| serde_json::json!({ "enabled": false }));
 
+    // Get cache stats if enabled
+    let cache_info = if let Some(stats) = state.cache_stats().await {
+        serde_json::json!({
+            "enabled": true,
+            "entries": stats.entries,
+            "hits": stats.hits,
+            "misses": stats.misses,
+            "hit_rate": format!("{:.1}%", stats.hit_rate()),
+            "evictions": stats.evictions,
+            "bytes_cached": stats.bytes_cached,
+        })
+    } else {
+        serde_json::json!({ "enabled": false })
+    };
+
     let json = serde_json::json!({
         "status": "ok",
         "triple_count": count,
         "version": env!("CARGO_PKG_VERSION"),
         "rate_limit": rate_limit_info,
+        "cache": cache_info,
     });
 
     (
@@ -588,6 +659,53 @@ async fn stats(State(state): State<SharedState>) -> impl IntoResponse {
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string_pretty(&json).unwrap(),
     )
+}
+
+/// Cache statistics endpoint
+async fn cache_stats(State(state): State<SharedState>) -> impl IntoResponse {
+    if let Some(stats) = state.cache_stats().await {
+        let json = serde_json::json!({
+            "enabled": true,
+            "entries": stats.entries,
+            "hits": stats.hits,
+            "misses": stats.misses,
+            "hit_rate": format!("{:.1}%", stats.hit_rate()),
+            "evictions": stats.evictions,
+            "expirations": stats.expirations,
+            "bytes_cached": stats.bytes_cached,
+            "max_entries": state.config.cache_max_entries,
+            "ttl_secs": state.config.cache_ttl_secs,
+        });
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"enabled": false}"#.to_string(),
+        )
+    }
+}
+
+/// Cache clear endpoint
+async fn cache_clear(State(state): State<SharedState>) -> impl IntoResponse {
+    if let Some(ref cache) = state.query_cache {
+        cache.invalidate().await;
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"status": "ok", "message": "Cache cleared"}"#.to_string(),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"status": "ok", "message": "Cache not enabled"}"#.to_string(),
+        )
+    }
 }
 
 // ============================================================================
@@ -598,7 +716,7 @@ async fn stats(State(state): State<SharedState>) -> impl IntoResponse {
 pub fn create_router(state: SharedState) -> Router {
     // CORS configuration
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS, Method::DELETE])
         .allow_origin(Any)
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]);
 
@@ -607,6 +725,8 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/sparql", get(sparql_get).post(sparql_post))
         .route("/health", get(health_check))
         .route("/stats", get(stats))
+        .route("/cache/stats", get(cache_stats))
+        .route("/cache/clear", axum::routing::post(cache_clear))
         .layer(cors)
         .with_state(state)
 }
